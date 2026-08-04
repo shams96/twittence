@@ -18,10 +18,18 @@ const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || "sound-octagon-44
 const hostingDir = path.resolve(__dirname, "..", "hosting");
 
 // On Cloud Functions, application-default credentials are provided automatically. Off Google Cloud
-// (e.g. a Hostinger VPS), admin.credential.applicationDefault() falls back to the file path in
-// GOOGLE_APPLICATION_CREDENTIALS (a downloaded service-account key) — see functions/.env.production.example.
+// (a Hostinger VPS or shared-hosting Node.js app), there's no automatic credential source, so this
+// falls back to an explicit service-account key — either as a file path (GOOGLE_APPLICATION_CREDENTIALS,
+// convenient on a VPS you control) or as the key's JSON pasted directly into an env var
+// (FIREBASE_SERVICE_ACCOUNT_JSON, needed on shared hosting where you can't place files outside the
+// web root and the panel's UI is env-vars-only). See functions/.env.production.example.
+let firebaseCredential;
+if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
+  firebaseCredential = admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON));
+}
 admin.initializeApp({
   projectId: FIREBASE_PROJECT_ID,
+  ...(firebaseCredential ? { credential: firebaseCredential } : {}),
 });
 
 const db = admin.firestore();
