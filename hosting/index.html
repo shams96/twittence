@@ -1,0 +1,132 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Twittence — AI Visibility Engine for Search, AI & Social</title>
+<meta name="description" content="Twittence audits your brand across SEO, Answer Engine Optimization, Generative Engine Optimization, and cross-platform sentiment — then runs a self-healing agent loop to find gaps, generate fixes, and verify results.">
+<meta name="theme-color" content="#15110c">
+<link rel="canonical" href="https://twittence.com/">
+<link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
+
+<meta property="og:type" content="website">
+<meta property="og:title" content="Twittence — AI Visibility Engine for Search, AI & Social">
+<meta property="og:description" content="One score, one fix. Audit your visibility across search, AI answer engines, generative AI, and social sentiment.">
+<meta property="og:image" content="/assets/og-image.png">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Twittence — AI Visibility Engine">
+<meta name="twitter:description" content="One score, one fix. Audit your visibility across search, AI answer engines, generative AI, and social sentiment.">
+
+<link rel="stylesheet" href="/css/styles.css">
+</head>
+<body>
+<div class="toast-container" id="toastContainer"></div>
+<nav><div class="inner">
+  <a href="#" class="brand">Twittence</a>
+  <div class="nav-right">
+    <button class="theme-toggle" id="themeBtn" type="button" aria-label="Toggle light/dark theme">◐</button>
+    <span id="userEmail" class="hidden" style="font-size:0.82rem;color:var(--text-dim)"></span>
+    <button class="btn btn-ghost btn-sm" id="authBtn" onclick="handleAuth()">Sign In</button>
+  </div>
+</div></nav>
+
+<section class="hero"><div class="container">
+  <span class="badge">Instrument-grade audit · Sign in once, keep the report</span>
+  <h1 class="fade-in">Read your signal across <span class="hl">search, AI &amp; social</span> — one dial, one fix</h1>
+  <p class="lead">Twittence measures your brand across SEO, answer engines, generative AI models, and cross-platform sentiment — then runs a self-healing agent loop to find gaps, generate fixes, and verify results. No guesswork. One audit. Every channel.</p>
+  <div style="display:flex;gap:1rem;justify-content:center;flex-wrap:wrap;margin-top:1.5rem">
+    <button class="btn btn-primary" onclick="scrollToForm()">Start Free Audit</button>
+    <a href="#how" class="btn btn-ghost">See How It Works</a>
+  </div>
+</div></section>
+
+<section id="pillars"><div class="container">
+  <div class="section-head" style="text-align:center;max-width:52ch;margin:0 auto 2rem">
+    <span class="eyebrow">Education, not jargon</span>
+    <h2 style="font-size:1.5rem;margin-top:.4rem">Four instruments, explained where you're looking</h2>
+  </div>
+  <div class="pillars">
+    <div class="dial-card" tabindex="0">
+      <h4>SEO</h4><div class="p-weight">30% of signal</div>
+      <div class="mini-gauge" style="--gauge-pct:74"><span>74</span></div>
+      <button class="learn" type="button">Why it matters ▾</button>
+      <div class="tip">Whether Google can crawl, index, and rank you at all — titles, headings, speed, canonical tags. The floor everything else is built on.</div>
+    </div>
+    <div class="dial-card" tabindex="0">
+      <h4>AEO</h4><div class="p-weight">25% of signal</div>
+      <div class="mini-gauge" style="--gauge-color:var(--ok);--gauge-pct:58"><span>58</span></div>
+      <button class="learn" type="button">Why it matters ▾</button>
+      <div class="tip">Whether you show up as the direct answer — featured snippets, FAQ schema, voice assistants reading you aloud instead of a competitor.</div>
+    </div>
+    <div class="dial-card" tabindex="0">
+      <h4>GEO</h4><div class="p-weight">25% of signal</div>
+      <div class="mini-gauge" style="--gauge-color:var(--warn);--gauge-pct:41"><span>41</span></div>
+      <button class="learn" type="button">Why it matters ▾</button>
+      <div class="tip">Whether ChatGPT, Perplexity, and Claude cite you when someone asks about your category. The newest pillar, already compounding fastest.</div>
+    </div>
+    <div class="dial-card" tabindex="0">
+      <h4>Sentiment</h4><div class="p-weight">20% of signal</div>
+      <div class="mini-gauge" style="--gauge-color:var(--crit);--gauge-pct:63"><span>63</span></div>
+      <button class="learn" type="button">Why it matters ▾</button>
+      <div class="tip">What people and forums actually say about you across X, Reddit, and review sites — the trust layer no crawler alone can measure.</div>
+    </div>
+  </div>
+</div></section>
+
+<section id="why"><div class="container">
+  <div class="card">
+    <h2>Why Twittence?</h2>
+    <p style="max-width:640px">Traditional SEO tools only measure search rankings. Modern discovery happens across search engines, AI chatbots, voice assistants, and social platforms. Twittence gives you the full picture — and a plan to fix it.</p>
+    <ul class="feature-list">
+      <li><span class="fl">01</span><div><strong>Unified Score</strong> — One metric across all channels, weighted by real impact</div></li>
+      <li><span class="fl">02</span><div><strong>Self-Healing Agent</strong> — Audits, researches, generates fixes, and verifies output automatically</div></li>
+      <li><span class="fl">03</span><div><strong>Machine-Readable Output</strong> — JSON-LD Schema.org, AEO answer blocks, and /llms.txt ready to deploy</div></li>
+      <li><span class="fl">04</span><div><strong>Cross-Platform Chatter</strong> — Tracks sentiment across X/Twitter, Reddit, and LLM context windows</div></li>
+    </ul>
+  </div>
+</div></section>
+
+<section id="how" class="scroll-section"><div class="container">
+  <div class="card">
+    <h2>How It Works</h2>
+    <p style="margin-bottom:1.25rem">Three frictionless steps. No file uploads, no image requirements, no guesswork.</p>
+    <div class="grid-3">
+      <div class="dial-card"><div class="p-icon">1</div><h4>Enter &amp; Select</h4><p>Type your URL, pick your audit focus from the dropdowns, and choose a vertical.</p></div>
+      <div class="dial-card"><div class="p-icon">2</div><h4>Run the Audit</h4><p>Twittence scans your page across 4 pillars and runs the self-healing agent loop.</p></div>
+      <div class="dial-card"><div class="p-icon">3</div><h4>Get Results</h4><p>See your 4-pillar scores, prioritized findings, and machine-readable outputs — ready to deploy.</p></div>
+    </div>
+  </div>
+</div></section>
+
+<section id="audit-section" class="scroll-section"><div class="card">
+  <h2>Run Your Audit</h2>
+  <p style="margin-bottom:1.25rem">Select your focus below. All fields are required — everything is a selection, no file uploads needed. Claude API analyzes your page and returns a complete 4-pillar score.</p>
+  <div class="form-grid">
+    <div class="form-group"><label for="url">Website URL</label><input type="url" id="url" placeholder="https://yourdomain.com" required></div>
+    <div class="form-group"><label for="topic">Audit Focus</label>
+      <select id="topic" required><option value="">— Select focus area —</option><option value="all">Run All — Complete Audit</option><option value="landing page optimization">Landing Page Optimization</option><option value="e-commerce product pages">E-Commerce Product Pages</option><option value="blog content strategy">Blog Content Strategy</option><option value="local service pages">Local Service Pages</option><option value="SaaS documentation">SaaS Documentation</option><option value="lead generation pages">Lead Generation Pages</option><option value="content cluster">Content Cluster / Pillar</option><option value="brand authority">Brand Authority Building</option><option value="conversion optimization">CRO &amp; Conversions</option></select>
+    </div>
+    <div class="form-group full"><label for="vertical">Marketing Vertical — ordered by impact on visibility</label><div class="section-label">Priority order: foundation first, compounding factors last</div>
+      <select id="vertical" required><option value="">— Select vertical —</option><option value="all">Run All — Full 4-Pillar Audit</option><option value="technical">1. Technical SEO — crawlability, speed, indexation</option><option value="seo">2. On-Page SEO — content, keywords, meta, headings</option><option value="aeo">3. Answer Engine Optimization — featured snippets, FAQs, schema</option><option value="geo">4. Generative Engine Optimization — AI citation density, LLM visibility</option><option value="sentiment">5. Cross-Platform Sentiment — trust, social proof, reviews</option><option value="content">6. Content Strategy — sustainability, topical authority</option><option value="local">7. Local SEO — citations, GMB, geo-signals</option><option value="ppc">8. PPC / Paid Search — immediate visibility, keyword bids</option><option value="social">9. Social Media — amplification, engagement signals</option><option value="email">10. Email Marketing — retention, repeat traffic</option></select>
+    </div>
+  </div>
+  <button class="btn-action" id="runAuditBtn" onclick="runBackendLoop()">Run Full Audit</button>
+  <div id="statusMessage"></div>
+  <div class="loading" id="loading"><div class="spinner"></div><p>Running self-healing agent loop...</p>
+    <div class="heal-steps" id="healSteps">
+      <div class="heal-step" id="hs-audit"><div class="hl">Audit</div><div>Scanning page</div></div>
+      <div class="heal-step" id="hs-research"><div class="hl">Research</div><div>Finding gaps</div></div>
+      <div class="heal-step" id="hs-fix"><div class="hl">Fix</div><div>Generating solutions</div></div>
+      <div class="heal-step" id="hs-verify"><div class="hl">Verify</div><div>Validating output</div></div>
+    </div>
+  </div>
+  <div id="results" class="hidden"></div>
+</div></section>
+
+<section><div class="container"><div class="card"><h2>Audit History</h2><div id="historyList"></div><p id="noHistory" style="color:#8888aa;text-align:center;padding:1rem">No audits yet. Sign in and run your first audit above.</p></div></div></section>
+
+<footer><div class="container"><p>&copy; 2026 Twittence. Self-Healing SEO / AEO / GEO &amp; Sentiment Engine. Built on Firebase &amp; Claude AI.</p></div></footer>
+
+<script type="module" src="/js/app.js"></script>
+</body>
+</html>
