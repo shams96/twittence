@@ -61,6 +61,12 @@ const allowedOrigins = process.env.ALLOWED_ORIGINS
 // every visitor loads) short-circuit the middleware chain and ship with zero security headers.
 app.use(
   helmet({
+    // Helmet's default Cross-Origin-Opener-Policy ("same-origin") isolates a popup window from its
+    // opener, breaking the window.closed/postMessage handshake Firebase's signInWithPopup relies on
+    // — it misreports the popup as closed even while it's still open and working (confirmed live:
+    // the "Auth failed" toast fired while the Google account picker was still visibly on screen).
+    // "same-origin-allow-popups" keeps the isolation for everything except windows this page opens.
+    crossOriginOpenerPolicy: { policy: "same-origin-allow-popups" },
     contentSecurityPolicy: {
       directives: {
         defaultSrc: ["'self'"],
