@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 220 40" role="img" aria-label="Twittence — AI visibility engine for search, AI answer engines, and social sentiment">
+<title>Twittence</title>
+<rect width="40" height="40" rx="10" fill="#15110c"/>
+<g transform="translate(20 20) rotate(-90) translate(-16 -16)" fill="none" stroke-width="5">
+<circle cx="16" cy="16" r="13" stroke="#f0a83c" stroke-dasharray="24.50 81.68" stroke-dashoffset="0"/>
+<circle cx="16" cy="16" r="13" stroke="#3ecf72" stroke-dasharray="20.42 81.68" stroke-dashoffset="-24.50"/>
+<circle cx="16" cy="16" r="13" stroke="#ffcf5c" stroke-dasharray="20.42 81.68" stroke-dashoffset="-44.92"/>
+<circle cx="16" cy="16" r="13" stroke="#ff6b52" stroke-dasharray="16.34 81.68" stroke-dashoffset="-65.35"/>
+</g>
+<text x="52" y="27" font-family="'Libre Bodoni','Bodoni 72','Bodoni MT',Didot,Georgia,serif" font-size="22" font-weight="700" fill="#e8b667">Twittence</text>
+</svg>

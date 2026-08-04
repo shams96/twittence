@@ -1,0 +1,29 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 630" role="img" aria-label="Twittence — AI Visibility Engine for Search, AI Answer Engines, and Social Sentiment">
+<defs>
+<radialGradient id="glow" cx="50%" cy="-10%" r="70%">
+<stop offset="0%" stop-color="#c9903f" stop-opacity="0.22"/>
+<stop offset="100%" stop-color="#c9903f" stop-opacity="0"/>
+</radialGradient>
+</defs>
+<rect width="1200" height="630" fill="#15110c"/>
+<rect width="1200" height="630" fill="url(#glow)"/>
+<text x="600" y="230" text-anchor="middle" font-family="ui-monospace,'SF Mono',Consolas,monospace" font-size="24" letter-spacing="4" fill="#a89880">AI VISIBILITY ENGINE</text>
+<g transform="translate(430 270)">
+<g transform="scale(3.2)" fill="none" stroke-width="5">
+<g transform="rotate(-90 16 16)">
+<circle cx="16" cy="16" r="13" stroke="#f0a83c" stroke-dasharray="24.50 81.68" stroke-dashoffset="0"/>
+<circle cx="16" cy="16" r="13" stroke="#3ecf72" stroke-dasharray="20.42 81.68" stroke-dashoffset="-24.50"/>
+<circle cx="16" cy="16" r="13" stroke="#ffcf5c" stroke-dasharray="20.42 81.68" stroke-dashoffset="-44.92"/>
+<circle cx="16" cy="16" r="13" stroke="#ff6b52" stroke-dasharray="16.34 81.68" stroke-dashoffset="-65.35"/>
+</g>
+</g>
+</g>
+<text x="640" y="345" font-family="'Libre Bodoni','Bodoni MT',Didot,Georgia,serif" font-weight="700" font-size="86" fill="#e8b667">Twittence</text>
+<g transform="translate(390 400)" font-family="ui-monospace,monospace" font-size="20" font-weight="700">
+<g transform="translate(0 0)"><rect width="90" height="42" rx="21" fill="#f0a83c"/><text x="45" y="27" text-anchor="middle" fill="#15110c">SEO</text></g>
+<g transform="translate(102 0)"><rect width="90" height="42" rx="21" fill="#3ecf72"/><text x="45" y="27" text-anchor="middle" fill="#15110c">AEO</text></g>
+<g transform="translate(204 0)"><rect width="90" height="42" rx="21" fill="#ffcf5c"/><text x="45" y="27" text-anchor="middle" fill="#15110c">GEO</text></g>
+<g transform="translate(306 0)"><rect width="150" height="42" rx="21" fill="#ff6b52"/><text x="75" y="27" text-anchor="middle" fill="#15110c">SENTIMENT</text></g>
+</g>
+<text x="600" y="500" text-anchor="middle" font-family="-apple-system,'Segoe UI',sans-serif" font-size="24" fill="#ede4d3">One score, one fix — for search, AI answer engines &amp; social</text>
+</svg>
