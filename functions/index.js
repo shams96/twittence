@@ -92,7 +92,7 @@ app.use(
   })
 );
 
-app.use(express.static(hostingDir));
+app.use(express.static(hostingDir, { extensions: ["html"] }));
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 
