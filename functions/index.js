@@ -379,16 +379,116 @@ function analyzeAeo($, html) {
 }
 
 const GENERIC_TOPIC_VALUES = new Set(["all", "run all", ""]);
+const QUESTION_HEADING_PATTERN = /^(what|how|why|when|where|who|which|can|should|is|are|does|do|will|would|could)\b/i;
 
+// Shared by analyzeGeo and analyzeContent — AI citation research (Princeton's GEO study, 2026
+// practitioner guides) consistently ties named-author attribution and content freshness to whether
+// generative engines treat a page as citable, not just whether Google can crawl it.
+function detectAuthorityAndFreshness($) {
+  const hasAuthor = $("[rel='author'], [class*='author' i], meta[name='author']").length > 0;
+  const authorHasExternalLink = $("[class*='author' i] a[href*='linkedin'], a[rel='author'][href]").length > 0;
+  const hasDatePublished = $("time, [datetime], meta[property='article:published_time']").length > 0;
+  const hasDateModified = $("meta[property='article:modified_time'], time[itemprop='dateModified']").length > 0;
+
+  const dtAttr = $("time[datetime]").first().attr("datetime")
+    || $("meta[property='article:modified_time']").attr("content")
+    || $("meta[property='article:published_time']").attr("content");
+  let isRecentlyUpdated = false;
+  if (dtAttr) {
+    const parsed = new Date(dtAttr);
+    if (!isNaN(parsed.getTime())) {
+      const monthsAgo = (Date.now() - parsed.getTime()) / (1000 * 60 * 60 * 24 * 30);
+      isRecentlyUpdated = monthsAgo <= 18;
+    }
+  }
+
+  return { hasAuthor, authorHasExternalLink, hasDatePublished, hasDateModified, isRecentlyUpdated };
+}
+
+// Heuristic proxy for "does the page lead with a direct answer" (AI retrieval research says
+// generative engines weigh a page's opening content heavily — the first ~200 words should answer
+// the query, not build up to it). True intent detection needs NLP; this checks whether a
+// substantive paragraph (15+ words) appears among the first content blocks once nav/header/footer
+// chrome is stripped out, as a deterministic stand-in for "gets to the point quickly."
+function hasEarlyDirectAnswer($) {
+  const main = $.root().clone();
+  main.find("nav, header, footer, script, style").remove();
+  const blocks = main.find("p, li").toArray();
+  for (let i = 0; i < Math.min(blocks.length, 5); i++) {
+    const wordCount = $(blocks[i]).text().trim().split(/\s+/).filter(Boolean).length;
+    if (wordCount >= 15) return true;
+  }
+  return false;
+}
+
+// AI retrieval consistently favors headings phrased as the literal question a user would type —
+// "What is X" beats "X Overview" for extraction into a conversational answer.
+function analyzeHeadingQuestions($) {
+  const headings = $("h2, h3, h4").map((_, el) => $(el).text().trim()).get().filter(Boolean);
+  const questionHeadings = headings.filter((h) => h.endsWith("?") || QUESTION_HEADING_PATTERN.test(h));
+  return { totalHeadings: headings.length, questionHeadings: questionHeadings.length };
+}
+
+// FAQ *presence* is necessary but not sufficient — research ties citation likelihood to answers
+// sized for extraction (roughly 40-160 words: long enough to be a complete answer, short enough to
+// lift verbatim into a generated response).
+function analyzeFaqQuality($) {
+  let hasFAQ = false;
+  let totalQuestions = 0;
+  let wellSizedAnswers = 0;
+  $("script[type='application/ld+json']").each((_, el) => {
+    try {
+      const json = JSON.parse($(el).html());
+      const items = Array.isArray(json) ? json : [json];
+      items.forEach((item) => {
+        if (item["@type"] === "FAQPage" && Array.isArray(item.mainEntity)) {
+          hasFAQ = true;
+          item.mainEntity.forEach((q) => {
+            totalQuestions++;
+            const answerText = q.acceptedAnswer && q.acceptedAnswer.text ? String(q.acceptedAnswer.text) : "";
+            const wordCount = answerText.split(/\s+/).filter(Boolean).length;
+            if (wordCount >= 40 && wordCount <= 160) wellSizedAnswers++;
+          });
+        }
+      });
+    } catch (_) { /* skip invalid JSON-LD */ }
+  });
+  return { hasFAQ, totalQuestions, wellSizedAnswers };
+}
+
+function detectSchemaTypes($) {
+  const types = new Set();
+  $("script[type='application/ld+json']").each((_, el) => {
+    try {
+      const json = JSON.parse($(el).html());
+      const items = Array.isArray(json) ? json : [json];
+      items.forEach((item) => { if (item["@type"]) types.add(String(item["@type"])); });
+    } catch (_) { /* skip invalid JSON-LD */ }
+  });
+  return types;
+}
+
+// Rebuilt around AI-citation research rather than keyword density: rank-#1-on-Google only
+// correlates with ~31% AI-citation odds and drops to ~2.6% by rank #4 (90% of pages AI actually
+// cites rank #21+ on Google) — GEO and traditional SEO are measurably different games, so this no
+// longer scores primarily on how often the topic's words appear on the page. Structural
+// extractability (does the page lead with an answer, are headings phrased as real questions, are
+// FAQ answers sized for lifting into a response) and authority/freshness signals are what the
+// research ties to actual citation likelihood.
 function analyzeGeo($, html, url, topic) {
+  const authority = detectAuthorityAndFreshness($);
+  const headingQ = analyzeHeadingQuestions($);
+  const faqQuality = analyzeFaqQuality($);
+  const schemaTypes = detectSchemaTypes($);
+  const hasArticleSchema = ["Article", "BlogPosting", "NewsArticle"].some((t) => schemaTypes.has(t));
+
   const pageText = $("body").text() || "";
   const wordCount = pageText.split(/\s+/).filter((w) => w.length > 2).length;
-  const pageTextLower = pageText.toLowerCase();
 
+  // Kept as informational context only (surfaced to findings/recommendations), not a scoring
+  // input — "does this page even seem to be about the stated topic" is a sanity check, not the
+  // primary measure of AI-citation readiness the way it used to be.
   let topicWords = topic.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
-  // "all" (Run All — Complete Audit) is a UI meta-selection, not a real topic — matching against
-  // the literal word "all" would unfairly zero out keyword coverage. Fall back to the page's own
-  // title/H1 as the real signal of what it's actually about.
   if (topicWords.length === 0 || GENERIC_TOPIC_VALUES.has(topic.trim().toLowerCase())) {
     const titleText = $("title").first().text() || "";
     const h1Text = $("h1").first().text() || "";
@@ -399,31 +499,40 @@ function analyzeGeo($, html, url, topic) {
       .filter((w, i, arr) => arr.indexOf(w) === i)
       .slice(0, 12);
   }
-
-  let citationDensity = 0;
-  topicWords.forEach((word) => {
-    const regex = new RegExp(`\\b${word.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}\\b`, "gi");
-    const matches = pageTextLower.match(regex);
-    if (matches) citationDensity += matches.length;
-  });
-
-  const density = wordCount > 0 ? (citationDensity / wordCount) * 100 : 0;
+  const pageTextLower = pageText.toLowerCase();
+  const topicKeywordsPresent = topicWords.filter((w) => pageTextLower.includes(w)).length;
 
   const checks = {
-    wordCount: wordCount,
-    citationDensity: Math.round(density * 100) / 100,
-    topicKeywordsPresent: topicWords.filter((w) => pageTextLower.includes(w)).length,
-    totalTopicKeywords: topicWords.length,
-    keywordCoverage: 0,
+    wordCount,
+    hasEarlyDirectAnswer: hasEarlyDirectAnswer($),
+    totalHeadings: headingQ.totalHeadings,
+    questionPhrasedHeadings: headingQ.questionHeadings,
+    questionHeadingRatio: headingQ.totalHeadings > 0
+      ? Math.round((headingQ.questionHeadings / headingQ.totalHeadings) * 100)
+      : 0,
+    hasFAQSchema: faqQuality.hasFAQ,
+    faqQuestionCount: faqQuality.totalQuestions,
+    faqWellSizedAnswers: faqQuality.wellSizedAnswers,
+    hasHowToSchema: schemaTypes.has("HowTo"),
+    hasArticleSchema,
+    schemaTypesFound: Array.from(schemaTypes),
+    hasAuthor: authority.hasAuthor,
+    authorHasExternalLink: authority.authorHasExternalLink,
+    hasDatePublished: authority.hasDatePublished,
+    hasDateModified: authority.hasDateModified,
+    isRecentlyUpdated: authority.isRecentlyUpdated,
+    topicRelevance: Math.min(100, Math.round((topicKeywordsPresent / Math.max(topicWords.length, 1)) * 100)),
   };
 
-  checks.keywordCoverage = Math.min(100, Math.round((checks.topicKeywordsPresent / Math.max(checks.totalTopicKeywords, 1)) * 100));
-
   let geoScore = 0;
-  geoScore += Math.min(30, checks.keywordCoverage);
-  geoScore += Math.min(25, Math.round(density * 500));
-  geoScore += Math.min(20, checks.wordCount > 500 ? 15 : checks.wordCount > 200 ? 8 : 3);
-  geoScore += Math.min(25, Math.round(checks.citationDensity * 20));
+  geoScore += checks.hasEarlyDirectAnswer ? 20 : 0;
+  geoScore += Math.min(20, Math.round(checks.questionHeadingRatio * 0.2));
+  geoScore += checks.hasFAQSchema
+    ? Math.min(20, 8 + Math.round((checks.faqWellSizedAnswers / Math.max(checks.faqQuestionCount, 1)) * 12))
+    : 0;
+  geoScore += (checks.hasFAQSchema ? 6 : 0) + (checks.hasHowToSchema ? 5 : 0) + (checks.hasArticleSchema ? 4 : 0);
+  geoScore += (checks.hasDatePublished ? 8 : 0) + (checks.isRecentlyUpdated ? 7 : 0);
+  geoScore += (checks.hasAuthor ? 6 : 0) + (checks.authorHasExternalLink ? 4 : 0);
   checks.geoScore = Math.min(100, geoScore);
   return checks;
 }
@@ -486,12 +595,17 @@ function analyzeSentiment(html) {
 }
 
 function analyzeContent($, html) {
-  const checks = { wordCount: 0, headingCount: 0, hasDatePublished: false, hasAuthor: false, internalLinkDepth: 0 };
+  const authority = detectAuthorityAndFreshness($);
+  const checks = {
+    wordCount: 0,
+    headingCount: 0,
+    hasDatePublished: authority.hasDatePublished,
+    hasAuthor: authority.hasAuthor,
+    internalLinkDepth: 0,
+  };
   const bodyText = $("body").text() || "";
   checks.wordCount = bodyText.split(/\s+/).filter((w) => w.length > 2).length;
   checks.headingCount = $("h1, h2, h3, h4, h5, h6").length;
-  checks.hasDatePublished = $("time, [datetime], meta[property='article:published_time']").length > 0;
-  checks.hasAuthor = $("[rel='author'], [class*='author' i], meta[name='author']").length > 0;
   checks.internalLinkDepth = $("a[href^='/'], a[href*='" + "://" + "']").length;
 
   let contentScore = 0;
@@ -504,13 +618,30 @@ function analyzeContent($, html) {
   return checks;
 }
 
+// Google's Gemini-powered "Ask Maps" local results weigh attribute-rich content (pricing, fit
+// guidance, problem specificity) over proximity — a real, recent shift away from the "near me"
+// ranking factors local SEO has relied on for a decade. These are the deterministic proxies for
+// that "trust content" pattern: does the page actually say what things cost, who it's/isn't a good
+// fit for, what specific problems it addresses, and how options compare — rather than just
+// asserting local presence via an address and a phone number.
+function analyzeLocalAttributeContent(bodyText) {
+  return {
+    hasPricingContent: /\$\d|\bprice[sd]?\b|\bpricing\b|\bcost[s]?\b|\bstarting at\b|\bquote\b|\bestimate\b/i.test(bodyText),
+    hasFitGuidance: /\bnot (a )?(good )?fit\b|\bideal for\b|\bbest for\b|\bisn'?t right for\b|\bwho (this|it) is for\b|\bnot recommended for\b/i.test(bodyText),
+    hasProblemContent: /\bcommon (problem|issue)s?\b|\bsymptoms? of\b|\bsigns? of\b|\bwhy (does|is|do)\b|\bissues? with\b|\btroubleshoot/i.test(bodyText),
+    hasComparisonContent: /\bvs\.?\b|\bversus\b|\bcompared to\b|\brepair or replace\b|\bwhich is better\b|\bpros and cons\b/i.test(bodyText),
+  };
+}
+
 function analyzeLocal($, html) {
   const bodyText = $("body").text() || "";
+  const attributeContent = analyzeLocalAttributeContent(bodyText);
   const checks = {
     hasPhoneNumber: /\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/.test(bodyText),
     hasAddressPattern: /\d{1,5}\s+[\w\s]{2,30}\s+(street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|lane|ln)\b/i.test(bodyText),
     hasLocalBusinessSchema: false,
     hasMapEmbed: $("iframe[src*='google.com/maps'], iframe[src*='maps.google']").length > 0,
+    ...attributeContent,
   };
   $("script[type='application/ld+json']").each((_, el) => {
     try {
@@ -523,12 +654,34 @@ function analyzeLocal($, html) {
   });
 
   let localScore = 0;
-  if (checks.hasPhoneNumber) localScore += 25;
-  if (checks.hasAddressPattern) localScore += 25;
-  if (checks.hasLocalBusinessSchema) localScore += 35;
-  if (checks.hasMapEmbed) localScore += 15;
+  if (checks.hasPhoneNumber) localScore += 15;
+  if (checks.hasAddressPattern) localScore += 15;
+  if (checks.hasLocalBusinessSchema) localScore += 20;
+  if (checks.hasMapEmbed) localScore += 10;
+  if (checks.hasPricingContent) localScore += 15;
+  if (checks.hasFitGuidance) localScore += 10;
+  if (checks.hasProblemContent) localScore += 10;
+  if (checks.hasComparisonContent) localScore += 5;
   checks.localScore = Math.min(100, localScore);
   return checks;
+}
+
+// Google's own 2015 "micro-moments" framework (want-to-know / want-to-go / want-to-do / want-to-buy)
+// — AI retrieval research ties citation likelihood to matching the whole situational moment behind
+// a query, not the keyword. This is a coarse heuristic classifier, not true intent detection: it
+// exists to steer the narrative's recommendations toward the right kind of content for the moment
+// the audit topic and page content actually represent, rather than generic advice.
+const MICRO_MOMENT_PATTERNS = [
+  { moment: "want-to-buy", pattern: /\b(buy|price|pricing|cost|quote|purchase|order|shop|deal|discount)\b/i },
+  { moment: "want-to-go", pattern: /\b(near me|nearby|local|location|directions|hours|open now|closest)\b/i },
+  { moment: "want-to-do", pattern: /\b(how to|fix|repair|install|troubleshoot|diy|steps to|guide)\b/i },
+];
+function classifyMicroMoment(topic, pageText) {
+  const combined = `${topic} ${(pageText || "").slice(0, 2000)}`.toLowerCase();
+  for (const { moment, pattern } of MICRO_MOMENT_PATTERNS) {
+    if (pattern.test(combined)) return moment;
+  }
+  return "want-to-know";
 }
 
 // Verticals with real page-measurable signal vs. verticals that need data this tool has no access to
@@ -599,6 +752,7 @@ app.post("/api/run-audit", verifyToken, async (req, res) => {
 
     let seoAnalysis = null, aeoAnalysis = null, geoAnalysis = null, sentimentAnalysis = null, contentAnalysis = null, localAnalysis = null;
     let $ = null;
+    let microMoment = classifyMicroMoment(trimmedTopic, "");
 
     if (html) {
       $ = cheerio.load(html, { decodeEntities: false });
@@ -608,6 +762,7 @@ app.post("/api/run-audit", verifyToken, async (req, res) => {
       sentimentAnalysis = analyzeSentiment(html);
       contentAnalysis = analyzeContent($, html);
       localAnalysis = analyzeLocal($, html);
+      microMoment = classifyMicroMoment(trimmedTopic, $("body").text());
 
       await auditRef.update({
         status: "scoring",
@@ -624,7 +779,16 @@ app.post("/api/run-audit", verifyToken, async (req, res) => {
     const SCORE_FIELD_BY_KEY = { seo: "seoScore", aeo: "aeoScore", geo: "geoScore", sentiment: "sentimentScore", content: "contentScore", local: "localScore" };
     const vertConfig = VERTICAL_ANALYSIS[trimmedVertical] || { measurable: true, key: trimmedVertical };
 
-    const fetchSystemPrompt = `You are an expert AI-powered visibility auditor. You are given the results of a deterministic, rule-based crawl analysis of a real page — treat those numbers as ground truth, not as something to re-estimate. Your job is to explain what they mean, cite specific evidence from the analysis in your findings, and produce actionable, evidence-grounded recommendations and a self-healing plan. Never invent a score that contradicts the supplied analysis, and never invent a score for something the evidence doesn't cover. Respond with ONLY valid JSON, no markdown fences, no commentary, matching this shape:
+    const fetchSystemPrompt = `You are an expert AI-powered visibility auditor. You are given the results of a deterministic, rule-based crawl analysis of a real page — treat those numbers as ground truth, not as something to re-estimate. Your job is to explain what they mean, cite specific evidence from the analysis in your findings, and produce actionable, evidence-grounded recommendations and a self-healing plan.
+
+Ground your reasoning in how AI search actually works, not outdated keyword-ranking assumptions:
+- Google ranking and AI citation are measurably decoupled: ranking #1 on Google only correlates with roughly a 31% chance of being cited in an AI answer, and that drops to ~2.6% by rank #4 — the majority of pages AI actually cites rank far outside Google's top 10. Never imply that a good SEO score alone means the page will be cited by AI.
+- Generative engines match whole situational queries ("moment matching"), not keyword strings. A page optimized for a keyword is not the same as a page optimized for the real question behind it.
+- What drives AI citation: content that leads with a direct answer in the first ~200 words, headings phrased as the literal question a user would ask, FAQ answers sized for extraction (roughly 40-160 words each), named-author attribution, and recent "last updated" freshness signals.
+- For local/service businesses specifically, proximity-based "near me" ranking is being displaced by attribute-matching (pricing specifics, who a service is/isn't a good fit for, specific problem/symptom content, comparison content) — this is a live, recent shift, not a hypothetical.
+- Most of what AI cites for a given query comes from outside the brand's own site (review platforms, forums, third-party roundups) — when a page's on-page signals are strong but you have no way to verify off-site presence, say so explicitly and recommend the business audit its presence on relevant review platforms rather than implying on-page work alone is sufficient.
+
+Never invent a score that contradicts the supplied analysis, and never invent a score for something the evidence doesn't cover. Respond with ONLY valid JSON, no markdown fences, no commentary, matching this shape:
 {"summary": string, "findings": string[], "recommendations": string[], "selfHealingPlan": [{"phase": string, "description": string}]}`;
 
     let evidenceBlock;
@@ -633,16 +797,20 @@ app.post("/api/run-audit", verifyToken, async (req, res) => {
     } else if (!html) {
       evidenceBlock = `No page analysis is available — the page could not be fetched (it may block crawlers or be unreachable). Note this limitation explicitly in your summary and findings, and avoid inventing specific technical claims about the page.`;
     } else if (trimmedVertical === "all") {
-      evidenceBlock = `Deterministic crawl analysis (ground truth — do not contradict these numbers):
-${JSON.stringify({ seo: seoAnalysis, aeo: aeoAnalysis, geo: geoAnalysis, sentiment: sentimentAnalysis }, null, 2)}`;
+      evidenceBlock = `Likely search moment behind this audit (Google's want-to-know / want-to-go / want-to-do / want-to-buy framework, heuristically classified — treat as a strong hint, not certain): ${microMoment}
+
+Deterministic crawl analysis (ground truth — do not contradict these numbers):
+${JSON.stringify({ seo: seoAnalysis, aeo: aeoAnalysis, geo: geoAnalysis, sentiment: sentimentAnalysis, local: localAnalysis }, null, 2)}`;
     } else {
-      evidenceBlock = `Deterministic crawl analysis for the ${trimmedVertical} pillar (ground truth — do not contradict these numbers):
+      evidenceBlock = `Likely search moment behind this audit: ${microMoment}
+
+Deterministic crawl analysis for the ${trimmedVertical} pillar (ground truth — do not contradict these numbers):
 ${JSON.stringify(ANALYSIS_BY_KEY[vertConfig.key], null, 2)}`;
     }
 
     const fetchUserPrompt = trimmedVertical === "all"
-      ? `Audit focus: "${trimmedTopic}". URL: ${trimmedUrl}.\n\n${evidenceBlock}\n\nWrite findings that cite specific numbers/fields from the analysis above (e.g. "meta description is missing" or "only 1 internal link found"), and recommendations that directly address the weakest-scoring pillars.`
-      : `Audit focus: "${trimmedTopic}", vertical: ${trimmedVertical}. URL: ${trimmedUrl}.\n\n${evidenceBlock}\n\nFocus your findings and recommendations specifically on the ${trimmedVertical} vertical.`;
+      ? `Audit focus: "${trimmedTopic}". URL: ${trimmedUrl}.\n\n${evidenceBlock}\n\nWrite findings that cite specific numbers/fields from the analysis above (e.g. "meta description is missing" or "only 1 internal link found"), and recommendations that directly address the weakest-scoring pillars. Tailor recommendations to the likely search moment above — e.g. want-to-go content needs different treatment than want-to-buy content.`
+      : `Audit focus: "${trimmedTopic}", vertical: ${trimmedVertical}. URL: ${trimmedUrl}.\n\n${evidenceBlock}\n\nFocus your findings and recommendations specifically on the ${trimmedVertical} vertical, tailored to the likely search moment above.`;
 
     const message = await anthropic.messages.create({
       model: "claude-sonnet-5",
@@ -703,6 +871,7 @@ ${JSON.stringify(ANALYSIS_BY_KEY[vertConfig.key], null, 2)}`;
       verticalMeasurable: vertConfig.measurable,
       verticalScore,
       externalBenchmark: externalBenchmark || null,
+      microMoment,
       summary: narrative.summary ?? "Audit completed.",
       findings: narrative.findings ?? [],
       recommendations: narrative.recommendations ?? [],

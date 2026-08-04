@@ -210,6 +210,13 @@ const VERTICAL_LABELS = {
   email: "Email Marketing",
 };
 
+const MICRO_MOMENT_LABELS = {
+  "want-to-know": "Moment: Want-to-know",
+  "want-to-go": "Moment: Want-to-go",
+  "want-to-do": "Moment: Want-to-do",
+  "want-to-buy": "Moment: Want-to-buy",
+};
+
 function renderResults(r, url, topic) {
   const d = document.getElementById("results");
   d.classList.remove("hidden");
@@ -263,10 +270,13 @@ function renderResults(r, url, topic) {
   }
 
   const topicDisplay = topic && topic !== "all" ? topic : "Complete audit";
+  const momentBadge = r.microMoment && MICRO_MOMENT_LABELS[r.microMoment]
+    ? `<span class="chip warn" title="Google's want-to-know / want-to-go / want-to-do / want-to-buy framework — the search moment this audit's recommendations are tailored to">${MICRO_MOMENT_LABELS[r.microMoment]}</span>`
+    : "";
   h += '<div class="report-shell"><div class="report-top"><span class="url">' +
     (url || "") +
     " — " + topicDisplay +
-    '</span><span class="chip ok">Scan complete</span></div><div class="report-body">';
+    `</span><span style="display:flex;gap:.4rem;flex-wrap:wrap">${momentBadge}<span class="chip ok">Scan complete</span></span></div><div class="report-body">`;
 
   h += '<div><h4>Fix first</h4><ul class="punch-list">';
   if (r.findings?.length) {
