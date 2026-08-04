@@ -192,6 +192,14 @@ function fetchHtml(url) {
     };
 
     const req = protocol.request(options, (res) => {
+      // A non-2xx response (rate limiting, bot-blocking, a dead page) is not the real page — analyzing
+      // its body as if it were would silently produce a misleadingly low/wrong score. Confirmed live:
+      // a site's Cloudflare rate limiting returned a tiny 429 body that got scored as an empty page.
+      if (res.statusCode < 200 || res.statusCode >= 300) {
+        req.destroy();
+        return reject(new Error(`URL returned HTTP ${res.statusCode} — the page may be blocking automated requests (rate limiting, bot protection) or temporarily unavailable.`));
+      }
+
       const contentType = (res.headers["content-type"] || "").toLowerCase();
       if (!contentType.includes("html") && !contentType.includes("xhtml") && !contentType.includes("text")) {
         req.destroy();
