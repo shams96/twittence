@@ -1003,5 +1003,9 @@ if (process.env.STANDALONE_SERVER === "true") {
   });
 }
 
-const functions = require("firebase-functions");
-exports.api = functions.https.onRequest(app);
+// Explicit v1 subpath, not the bare "firebase-functions" entrypoint: v6 changed the default export
+// to the v2 (Gen2/Cloud Run) API, which would silently redeploy this as a different function
+// generation. Importing from firebase-functions/v1/https keeps the existing 1st-gen onRequest
+// behavior exactly as before, regardless of the package's own default changing.
+const { onRequest } = require("firebase-functions/v1/https");
+exports.api = onRequest(app);
