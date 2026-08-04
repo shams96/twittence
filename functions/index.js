@@ -9,13 +9,20 @@ const { Anthropic } = require("@anthropic-ai/sdk");
 const cheerio = require("cheerio");
 const he = require("he");
 const path = require("path");
+const fs = require("fs");
 const https = require("https");
 const http = require("http");
 
 const app = express();
 const PORT = process.env.PORT || 3000;
 const FIREBASE_PROJECT_ID = process.env.FIREBASE_PROJECT_ID || "sound-octagon-444117-m9";
-const hostingDir = path.resolve(__dirname, "..", "hosting");
+// Firebase and a VPS keep hosting/ as a sibling of functions/ (the repo's real layout). Hostinger's
+// Node.js App deploy only keeps the selected Application root in the running version and drops
+// sibling folders from the uploaded zip entirely — so hosting/ has to be bundled inside functions/
+// for that target instead. Support both without restructuring the repo itself.
+const siblingHostingDir = path.resolve(__dirname, "..", "hosting");
+const bundledHostingDir = path.resolve(__dirname, "hosting");
+const hostingDir = fs.existsSync(siblingHostingDir) ? siblingHostingDir : bundledHostingDir;
 
 // On Cloud Functions, application-default credentials are provided automatically. Off Google Cloud
 // (a Hostinger VPS or shared-hosting Node.js app), there's no automatic credential source, so this
@@ -980,7 +987,16 @@ app.use((err, _req, res, _next) => {
   res.status(500).json({ error: "Internal server error" });
 });
 
-if (require.main === module) {
+// Explicit opt-in, not environment auto-detection: Firebase Cloud Functions never calls listen()
+// itself (it invokes the exported handler directly), and neither does the Firebase CLI's own local
+// pre-deploy step that briefly requires this file to inspect its exports — but that CLI step doesn't
+// set any Cloud Functions runtime env vars either, so it's indistinguishable from a real standalone
+// host by environment alone. require.main === module isn't reliable either: some hosts (Hostinger's
+// Node.js App manager) load this file via require() rather than executing it directly, so that check
+// is never true there. Set STANDALONE_SERVER=true explicitly wherever this should actually listen
+// (Hostinger's env vars, local dev, a VPS) — never in functions/.env, since that file ships with the
+// Firebase deploy.
+if (process.env.STANDALONE_SERVER === "true") {
   app.listen(PORT, () => {
     console.log(`Twittence API server running on port ${PORT}`);
     console.log(`Environment: ${process.env.NODE_ENV || "development"}`);

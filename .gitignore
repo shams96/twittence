@@ -8,3 +8,4 @@ firebase-debug.*.log
 logs/
 *.log
 .DS_Store
+_pkg/
