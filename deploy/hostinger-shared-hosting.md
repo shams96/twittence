@@ -65,6 +65,17 @@ Same screen, **Environment Variables** section — add these:
 | `FIREBASE_PROJECT_ID` | `sound-octagon-444117-m9` |
 | `ALLOWED_ORIGINS` | `https://twittence.com,https://www.twittence.com` |
 | `FIREBASE_SERVICE_ACCOUNT_JSON` | the full contents of your service-account key, see below |
+| `INTERNAL_FETCH_SECRET` | a random secret string — same value must also be set on the Firebase deployment's `functions/.env` |
+| `FETCH_PROXY_URL` | `https://us-central1-sound-octagon-444117-m9.cloudfunctions.net` |
+
+### Why FETCH_PROXY_URL matters here specifically
+
+Shared hosting IPs get rate-limited by sites' bot protection (Cloudflare, etc.) far more than Google
+Cloud's IPs do — confirmed live against a real site whose Cloudflare protection blocked Hostinger's
+IP outright while Google's own infrastructure fetched the identical page successfully. When a direct
+page fetch fails, this makes the app fall back to fetching through the Firebase Cloud Function
+instead, at no extra cost since that infrastructure already exists. Skip these two vars and audits
+will still work — they'll just be more likely to fail against Cloudflare-protected sites.
 
 ### Getting the service-account JSON
 

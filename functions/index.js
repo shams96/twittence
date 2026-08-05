@@ -197,7 +197,9 @@ function fetchHtml(url) {
       // a site's Cloudflare rate limiting returned a tiny 429 body that got scored as an empty page.
       if (res.statusCode < 200 || res.statusCode >= 300) {
         req.destroy();
-        return reject(new Error(`URL returned HTTP ${res.statusCode} — the page may be blocking automated requests (rate limiting, bot protection) or temporarily unavailable.`));
+        const err = new Error(`URL returned HTTP ${res.statusCode} — the page may be blocking automated requests (rate limiting, bot protection) or temporarily unavailable.`);
+        err.statusCode = res.statusCode;
+        return reject(err);
       }
 
       const contentType = (res.headers["content-type"] || "").toLowerCase();
@@ -215,6 +217,86 @@ function fetchHtml(url) {
     req.on("timeout", () => { req.destroy(); reject(new Error("Fetch timeout")); });
     req.end();
   });
+}
+
+const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+// A 429/503 is often a temporary window (Cloudflare rate limiting, a brief upstream hiccup), not a
+// permanent block — one or two short retries can succeed for free where an immediate failure
+// wouldn't. Anything else (403, timeout, DNS failure) isn't worth retrying.
+async function fetchHtmlWithRetry(url, retries = 2) {
+  const delays = [1000, 3000];
+  let lastError;
+  for (let attempt = 0; attempt <= retries; attempt++) {
+    try {
+      return await fetchHtml(url);
+    } catch (err) {
+      lastError = err;
+      const retryable = err.statusCode === 429 || err.statusCode === 503;
+      if (!retryable || attempt === retries) throw err;
+      await sleep(delays[attempt] || 3000);
+    }
+  }
+  throw lastError;
+}
+
+function postJson(targetUrl, body, headers, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(targetUrl);
+    const payload = JSON.stringify(body);
+    const req = https.request({
+      hostname: parsed.hostname,
+      port: parsed.port || 443,
+      path: parsed.pathname + parsed.search,
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Content-Length": Buffer.byteLength(payload), ...headers },
+      timeout: timeoutMs || 25000,
+    }, (res) => {
+      let data = "";
+      res.on("data", (chunk) => { data += chunk; });
+      res.on("end", () => {
+        if (res.statusCode < 200 || res.statusCode >= 300) {
+          return reject(new Error(`Proxy fetch returned HTTP ${res.statusCode}: ${data.slice(0, 200)}`));
+        }
+        try { resolve(JSON.parse(data)); } catch (e) { reject(new Error("Proxy fetch returned invalid JSON")); }
+      });
+    });
+    req.on("error", reject);
+    req.on("timeout", () => { req.destroy(); reject(new Error("Proxy fetch timeout")); });
+    req.write(payload);
+    req.end();
+  });
+}
+
+// A shared cheap-hosting IP (Hostinger) gets a worse bot-reputation score from services like
+// Cloudflare than Google Cloud's IP ranges do — confirmed live: nutrifysupp.com's Cloudflare
+// protection returned 429 "local_rate_limited" to Hostinger's IP while Google's own infrastructure
+// (via the PageSpeed Insights API, same origin, same site) fetched the identical page successfully.
+// Rather than fighting IP reputation with paid rotating-proxy services, this routes a failed direct
+// fetch through the Firebase Cloud Function instead — infrastructure this project already runs, at
+// no extra cost. Only activates when FETCH_PROXY_URL + INTERNAL_FETCH_SECRET are configured (e.g.
+// on the Hostinger deployment, pointed at the Firebase function); a no-op everywhere else, including
+// on Firebase itself, where there's no better IP to fall back to.
+async function fetchHtmlWithFallback(url) {
+  try {
+    return await fetchHtmlWithRetry(url);
+  } catch (directError) {
+    if (!process.env.FETCH_PROXY_URL || !process.env.INTERNAL_FETCH_SECRET) throw directError;
+    console.error("Direct fetch failed, trying proxy fallback:", directError.message);
+    try {
+      const proxied = await postJson(
+        `${process.env.FETCH_PROXY_URL}/api/internal/fetch-proxy`,
+        { url },
+        { "X-Internal-Secret": process.env.INTERNAL_FETCH_SECRET },
+        25000
+      );
+      if (!proxied.html) throw new Error("Proxy fallback returned no HTML");
+      return { statusCode: proxied.statusCode, html: proxied.html, headers: {} };
+    } catch (proxyError) {
+      console.error("Proxy fallback also failed:", proxyError.message);
+      throw directError;
+    }
+  }
 }
 
 // Google's own Lighthouse SEO score via the PageSpeed Insights API — a credible, independently-
@@ -727,6 +809,28 @@ app.get("/api/health", (_req, res) => {
   res.status(200).json({ status: "ok", timestamp: new Date().toISOString() });
 });
 
+// Server-to-server only, not for end users — lets one deployment of this app fetch a page through
+// another deployment's IP when its own direct fetch gets rate-limited/blocked (see
+// fetchHtmlWithFallback). Guarded by a shared secret rather than verifyToken since there's no
+// end-user Firebase session in this call; without a matching secret this would otherwise be an open
+// proxy anyone could use to fetch arbitrary URLs through our server.
+app.post("/api/internal/fetch-proxy", async (req, res) => {
+  if (!process.env.INTERNAL_FETCH_SECRET || req.headers["x-internal-secret"] !== process.env.INTERNAL_FETCH_SECRET) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+  const { url } = req.body || {};
+  const validationErrors = validateUrl(url);
+  if (validationErrors.length > 0) {
+    return res.status(400).json({ error: "Validation failed", details: validationErrors });
+  }
+  try {
+    const result = await fetchHtmlWithRetry(url);
+    res.status(200).json({ statusCode: result.statusCode, html: result.html });
+  } catch (error) {
+    res.status(502).json({ error: error.message });
+  }
+});
+
 app.post("/api/run-audit", verifyToken, async (req, res) => {
   let auditRef = null;
 
@@ -756,7 +860,7 @@ app.post("/api/run-audit", verifyToken, async (req, res) => {
 
     const seoRelevant = ["all", "technical", "seo"].includes(trimmedVertical);
     const [fetchOutcome, externalBenchmark] = await Promise.all([
-      fetchHtml(trimmedUrl).catch((fetchError) => {
+      fetchHtmlWithFallback(trimmedUrl).catch((fetchError) => {
         console.error("Page fetch failed:", fetchError.message);
         return null;
       }),
@@ -1119,7 +1223,7 @@ app.post("/api/site-wide-audit", verifyToken, async (req, res) => {
     const results = [];
     for (const pageUrl of discovered) {
       try {
-        const fetchResult = await fetchHtml(pageUrl);
+        const fetchResult = await fetchHtmlWithFallback(pageUrl);
         const $ = cheerio.load(fetchResult.html, { decodeEntities: false });
         const seoChecks = analyzeSeo($, fetchResult.html);
         const aeoChecks = analyzeAeo($, fetchResult.html);
