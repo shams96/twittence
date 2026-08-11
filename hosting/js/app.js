@@ -217,6 +217,73 @@ const MICRO_MOMENT_LABELS = {
   "want-to-buy": "Moment: Want-to-buy",
 };
 
+// Verticals ranked by real business impact for each audit focus, highest first.
+// Only measurable-from-a-crawl verticals (technical/seo/aeo/geo/sentiment/content/local) are ranked —
+// ppc/social/email can't be scored from an on-page audit for any focus, so they always sink to the
+// bottom regardless of focus (impactful-but-unachievable-here isn't useful to surface first).
+const FOCUS_VERTICAL_PRIORITY = {
+  "landing page optimization": ["seo", "aeo", "technical", "geo", "content", "sentiment", "local"],
+  "e-commerce product pages": ["seo", "technical", "geo", "content", "local", "sentiment", "aeo"],
+  "blog content strategy": ["content", "aeo", "seo", "geo", "sentiment", "technical", "local"],
+  "local service pages": ["local", "technical", "seo", "geo", "sentiment", "content", "aeo"],
+  "SaaS documentation": ["aeo", "geo", "content", "seo", "technical", "sentiment", "local"],
+  "lead generation pages": ["seo", "aeo", "technical", "content", "sentiment", "geo", "local"],
+  "content cluster": ["content", "seo", "aeo", "geo", "technical", "sentiment", "local"],
+  "brand authority": ["geo", "sentiment", "content", "aeo", "seo", "technical", "local"],
+  "conversion optimization": ["seo", "aeo", "technical", "sentiment", "geo", "content", "local"],
+};
+const NON_MEASURABLE_VERTICALS = ["ppc", "social", "email"];
+let defaultVerticalOptionOrder = null;
+
+function reorderVerticalOptions(topic) {
+  const select = document.getElementById("vertical");
+  if (!select) return;
+
+  if (!defaultVerticalOptionOrder) {
+    defaultVerticalOptionOrder = Array.from(select.options).map((o) => ({ value: o.value, text: o.text }));
+  }
+
+  const priority = FOCUS_VERTICAL_PRIORITY[topic];
+  const fixed = defaultVerticalOptionOrder.filter((o) => o.value === "" || o.value === "all");
+  const rest = defaultVerticalOptionOrder.filter((o) => o.value !== "" && o.value !== "all");
+
+  let ordered;
+  if (!priority) {
+    ordered = rest;
+  } else {
+    const byValue = Object.fromEntries(rest.map((o) => [o.value, o]));
+    const recommended = priority.filter((v) => byValue[v]).map((v) => byValue[v]);
+    const remainingMeasurable = rest.filter((o) => !priority.includes(o.value) && !NON_MEASURABLE_VERTICALS.includes(o.value));
+    const nonMeasurable = rest.filter((o) => NON_MEASURABLE_VERTICALS.includes(o.value));
+    ordered = [...recommended, ...remainingMeasurable, ...nonMeasurable];
+  }
+
+  const selectedValue = select.value;
+  select.innerHTML = "";
+  fixed.forEach((o) => select.add(new Option(o.text, o.value)));
+  ordered.forEach((o, i) => {
+    const isRecommended = priority && i < 3 && priority.includes(o.value);
+    select.add(new Option(isRecommended ? `★ ${o.text}` : o.text, o.value));
+  });
+  if (Array.from(select.options).some((o) => o.value === selectedValue)) {
+    select.value = selectedValue;
+  }
+
+  const hint = document.getElementById("verticalHint");
+  if (hint) {
+    hint.textContent = priority
+      ? "★ = ranked highest-impact and measurable for this focus. Full list still available below."
+      : "Priority order: foundation first, compounding factors last";
+  }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  const topicSelect = document.getElementById("topic");
+  if (topicSelect) {
+    topicSelect.addEventListener("change", () => reorderVerticalOptions(topicSelect.value));
+  }
+});
+
 function renderResults(r, url, topic) {
   const d = document.getElementById("results");
   d.classList.remove("hidden");
