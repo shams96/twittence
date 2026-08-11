@@ -930,29 +930,39 @@ ${JSON.stringify(ANALYSIS_BY_KEY[vertConfig.key], null, 2)}`;
       ? `Audit focus: "${trimmedTopic}". URL: ${trimmedUrl}.\n\n${evidenceBlock}\n\nWrite findings that cite specific numbers/fields from the analysis above (e.g. "meta description is missing" or "only 1 internal link found"), and recommendations that directly address the weakest-scoring pillars. Tailor recommendations to the likely search moment above — e.g. want-to-go content needs different treatment than want-to-buy content.`
       : `Audit focus: "${trimmedTopic}", vertical: ${trimmedVertical}. URL: ${trimmedUrl}.\n\n${evidenceBlock}\n\nFocus your findings and recommendations specifically on the ${trimmedVertical} vertical, tailored to the likely search moment above.`;
 
-    const message = await anthropic.messages.create({
-      model: "claude-sonnet-5",
-      max_tokens: 4096,
-      system: fetchSystemPrompt,
-      messages: [
-        { role: "user", content: fetchUserPrompt },
-      ],
-    });
-
-    const textBlock = message.content.find((b) => b.type === "text");
-    const rawContent = textBlock ? textBlock.text : "";
+    async function requestNarrative() {
+      const message = await anthropic.messages.create({
+        model: "claude-sonnet-5",
+        max_tokens: 4096,
+        system: fetchSystemPrompt,
+        messages: [
+          { role: "user", content: fetchUserPrompt },
+        ],
+      });
+      const textBlock = message.content.find((b) => b.type === "text");
+      const rawContent = textBlock ? textBlock.text : "";
+      const jsonMatch = rawContent.match(/\{[\s\S]*\}/);
+      return JSON.parse(jsonMatch ? jsonMatch[0] : rawContent);
+    }
 
     let narrative;
+    let narrativePartial = false;
     try {
-      const jsonMatch = rawContent.match(/\{[\s\S]*\}/);
-      narrative = JSON.parse(jsonMatch ? jsonMatch[0] : rawContent);
-    } catch (parseError) {
-      narrative = {
-        summary: rawContent || "Audit completed, but the narrative could not be generated.",
-        findings: [],
-        recommendations: [],
-        selfHealingPlan: [],
-      };
+      narrative = await requestNarrative();
+    } catch (firstError) {
+      console.error("Narrative generation failed, retrying once:", firstError.message);
+      try {
+        narrative = await requestNarrative();
+      } catch (secondError) {
+        console.error("Narrative generation failed on retry:", secondError.message);
+        narrativePartial = true;
+        narrative = {
+          summary: "Scores below are accurate, but the AI-generated narrative (findings, recommendations, self-healing plan) could not be produced this time. Please re-run the audit to get the full narrative.",
+          findings: [],
+          recommendations: [],
+          selfHealingPlan: [],
+        };
+      }
     }
 
     // Scores are authoritative from the deterministic crawl analysis whenever a real fetch succeeded.
@@ -990,6 +1000,7 @@ ${JSON.stringify(ANALYSIS_BY_KEY[vertConfig.key], null, 2)}`;
       verticalScore,
       externalBenchmark: externalBenchmark || null,
       microMoment,
+      narrativePartial,
       summary: narrative.summary ?? "Audit completed.",
       findings: narrative.findings ?? [],
       recommendations: narrative.recommendations ?? [],

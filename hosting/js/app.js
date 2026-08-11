@@ -273,7 +273,11 @@ function renderResults(r, url, topic) {
   const momentBadge = r.microMoment && MICRO_MOMENT_LABELS[r.microMoment]
     ? `<span class="chip warn" title="Google's want-to-know / want-to-go / want-to-do / want-to-buy framework — the search moment this audit's recommendations are tailored to">${MICRO_MOMENT_LABELS[r.microMoment]}</span>`
     : "";
-  h += '<div class="report-shell"><div class="report-top"><span class="url">' +
+  const partialBanner = r.narrativePartial
+    ? `<div class="status status-error" style="margin-bottom:1rem"><strong>AI narrative unavailable this run</strong> — the scores above are accurate (they come from the deterministic page crawl, not the AI), but findings, recommendations, and the self-healing plan couldn't be generated. Re-run the audit to get the full report.</div>`
+    : "";
+
+  h += partialBanner + '<div class="report-shell"><div class="report-top"><span class="url">' +
     (url || "") +
     " — " + topicDisplay +
     `</span><span style="display:flex;gap:.4rem;flex-wrap:wrap">${momentBadge}<span class="chip ok">Scan complete</span></span></div><div class="report-body">`;
