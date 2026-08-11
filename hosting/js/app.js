@@ -430,17 +430,39 @@ async function loadHistory(uid) {
       const d = doc.data();
       const topicLabel = d.topic && d.topic !== "all" ? d.topic : "Complete audit";
       const verticalLabel = d.vertical && d.vertical !== "all" ? d.vertical : "all 4 pillars";
-      return `<div class="heal-step" style="text-align:left;display:flex;justify-content:space-between;align-items:center;padding:0.6rem 0.75rem"><div><b>${
-        d.url
-      }</b> <span style="color:var(--text-dim);font-size:0.8rem">— ${topicLabel} (${verticalLabel})</span></div><div style="display:flex;gap:0.4rem;flex-wrap:wrap;align-items:center">${
-        d.seoScore != null ? `<span class="badge">SEO ${d.seoScore}</span>` : ""
-      }${
-        d.aeoScore != null ? `<span class="badge">AEO ${d.aeoScore}</span>` : ""
-      }${
-        d.geoScore != null ? `<span class="badge">GEO ${d.geoScore}</span>` : ""
-      }${
-        d.sentimentScore != null ? `<span class="badge">Sent ${d.sentimentScore}</span>` : ""
-      }${d.twittenceScore != null ? `<span style="font-weight:700;color:var(--brass-bright);font-family:var(--mono)">${d.twittenceScore}/100</span>` : ""}<button class="btn-ghost-sm" onclick="downloadHistoryReport('${doc.id}', '${(d.url || "").replace(/'/g, "\\'")}')" title="Download this report">&#8681;</button></div></div>`;
+      const score = d.twittenceScore ?? d.verticalScore ?? null;
+      const tier = score == null ? "" : score >= 70 ? "tier-high" : score >= 40 ? "tier-med" : "tier-low";
+      const scoreClass = score == null ? "" : score >= 70 ? "score-high" : score >= 40 ? "score-med" : "score-low";
+      const dateLabel = formatHistoryDate(d.createdAt);
+      const badges = [
+        d.seoScore != null ? `<span class="badge">SEO ${d.seoScore}</span>` : "",
+        d.aeoScore != null ? `<span class="badge">AEO ${d.aeoScore}</span>` : "",
+        d.geoScore != null ? `<span class="badge">GEO ${d.geoScore}</span>` : "",
+        d.sentimentScore != null ? `<span class="badge">Sent ${d.sentimentScore}</span>` : "",
+      ].join("");
+      return `<div class="history-card ${tier}">
+        <div class="history-score ${scoreClass}">${score != null ? score : "—"}</div>
+        <div class="history-main">
+          <span class="url">${d.url || ""}</span>
+          <div class="history-meta"><span>${topicLabel}</span><span class="dot">&middot;</span><span>${verticalLabel}</span>${dateLabel ? `<span class="dot">&middot;</span><span>${dateLabel}</span>` : ""}</div>
+        </div>
+        <div class="history-badges">${badges}<button class="btn-ghost-sm" onclick="downloadHistoryReport('${doc.id}', '${(d.url || "").replace(/'/g, "\\'")}')" title="Download this report">&#8681;</button></div>
+      </div>`;
     })
     .join("");
+}
+
+function formatHistoryDate(ts) {
+  if (!ts || typeof ts.toDate !== "function") return "";
+  const d = ts.toDate();
+  const now = new Date();
+  const diffMs = now - d;
+  const diffMin = Math.floor(diffMs / 60000);
+  if (diffMin < 1) return "just now";
+  if (diffMin < 60) return `${diffMin}m ago`;
+  const diffHr = Math.floor(diffMin / 60);
+  if (diffHr < 24) return `${diffHr}h ago`;
+  const diffDay = Math.floor(diffHr / 24);
+  if (diffDay < 7) return `${diffDay}d ago`;
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: d.getFullYear() !== now.getFullYear() ? "numeric" : undefined });
 }
