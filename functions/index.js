@@ -1013,6 +1013,7 @@ app.post("/api/internal/fetch-proxy", async (req, res) => {
 
 app.post("/api/run-audit", verifyToken, async (req, res) => {
   let auditRef = null;
+  let responseSent = false;
 
   try {
     const { url, topic, vertical } = req.body;
@@ -1114,10 +1115,102 @@ ${JSON.stringify(ANALYSIS_BY_KEY[vertConfig.key], null, 2)}`;
       ? `Audit focus: "${trimmedTopic}". URL: ${trimmedUrl}.\n\n${evidenceBlock}\n\nWrite findings that cite specific numbers/fields from the analysis above (e.g. "meta description is missing" or "only 1 internal link found"), and recommendations that directly address the weakest-scoring pillars. Tailor recommendations to the likely search moment above — e.g. want-to-go content needs different treatment than want-to-buy content.`
       : `Audit focus: "${trimmedTopic}", vertical: ${trimmedVertical}. URL: ${trimmedUrl}.\n\n${evidenceBlock}\n\nFocus your findings and recommendations specifically on the ${trimmedVertical} vertical, tailored to the likely search moment above.`;
 
+    // Scores are authoritative from the deterministic crawl analysis whenever a real fetch succeeded.
+    // Non-measurable verticals (ppc/social/email) never get a fabricated numeric score.
+    const finalScores = {
+      seoScore: seoAnalysis?.seoScore ?? null,
+      aeoScore: aeoAnalysis?.aeoScore ?? null,
+      geoScore: geoAnalysis?.geoScore ?? null,
+      sentimentScore: sentimentAnalysis?.sentimentScore ?? null,
+    };
+    if (trimmedVertical !== "all") {
+      // Single-vertical runs only report the one relevant pillar — the other three stay null
+      // rather than implying a full 4-pillar audit ran.
+      Object.keys(finalScores).forEach((field) => {
+        if (SCORE_FIELD_BY_KEY[vertConfig.key] !== field) finalScores[field] = null;
+      });
+    }
+
+    const verticalScore = vertConfig.measurable && vertConfig.key
+      ? ANALYSIS_BY_KEY[vertConfig.key]?.[SCORE_FIELD_BY_KEY[vertConfig.key]] ?? null
+      : null;
+
+    // The narrative call (Claude synthesizing findings/recommendations/self-healing plan) is the slow
+    // part of this request — for a full "all"-vertical audit, confirmed live (2026-08-12) it can take
+    // ~90s, which exceeds Hostinger's ~60s reverse-proxy gateway timeout regardless of how large
+    // max_tokens is set. Scores are already fully computed and don't need Claude at all, so they're
+    // returned immediately here; the narrative is generated afterward and the client polls
+    // GET /api/audit-status/:auditId for it, instead of one request having to survive the full
+    // worst-case Claude generation time.
+    const scoresOnlyResults = {
+      twittenceScore: trimmedVertical === "all"
+        ? computeUnifiedScore({
+            seo: { seoScore: finalScores.seoScore },
+            aeo: { aeoScore: finalScores.aeoScore },
+            geo: { geoScore: finalScores.geoScore },
+            sentiment: { sentimentScore: finalScores.sentimentScore },
+          })
+        : null,
+      ...finalScores,
+      vertical: trimmedVertical,
+      verticalMeasurable: vertConfig.measurable,
+      verticalScore,
+      externalBenchmark: externalBenchmark || null,
+      microMoment,
+      narrativePending: true,
+      summary: "",
+      findings: [],
+      recommendations: [],
+      selfHealingPlan: [],
+    };
+    if (seoAnalysis) {
+      scoresOnlyResults.seoChecks = seoAnalysis;
+      scoresOnlyResults.aeoChecks = aeoAnalysis;
+      scoresOnlyResults.geoChecks = geoAnalysis;
+      scoresOnlyResults.sentimentChecks = sentimentAnalysis;
+      scoresOnlyResults.contentChecks = contentAnalysis;
+      scoresOnlyResults.localChecks = localAnalysis;
+    }
+
+    await auditRef.set({
+      url: trimmedUrl,
+      topic: trimmedTopic,
+      vertical: trimmedVertical,
+      results: scoresOnlyResults,
+      twittenceScore: scoresOnlyResults.twittenceScore,
+      seoScore: scoresOnlyResults.seoScore,
+      aeoScore: scoresOnlyResults.aeoScore,
+      geoScore: scoresOnlyResults.geoScore,
+      sentimentScore: scoresOnlyResults.sentimentScore,
+      verticalScore: scoresOnlyResults.verticalScore,
+      verticalMeasurable: scoresOnlyResults.verticalMeasurable,
+      status: "scoring",
+      auditPhase: "narrative-pending",
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      uid: uid,
+    }, { merge: true });
+
+    res.status(200).json({
+      auditId: auditRef.id,
+      results: scoresOnlyResults,
+    });
+    responseSent = true;
+
+    // Everything below runs after the response has already been sent — this request is done from the
+    // client's perspective. On Hostinger (a persistent Node process) this reliably completes. On
+    // Firebase Cloud Functions 1st gen, post-response background work is best-effort, not guaranteed
+    // (Google's own documented behavior) — acceptable here since Hostinger (twittence.com) is the
+    // primary deployment and Firebase is the secondary/fallback; the audit doc's "scoring" status
+    // means a client that polls and never sees "complete" can still see accurate scores.
     async function requestNarrative() {
       const message = await anthropic.messages.create({
         model: "claude-sonnet-5",
-        max_tokens: 4096,
+        // A full "all"-vertical audit synthesizes 6 analyses into findings + recommendations + a
+        // multi-phase self-healing plan in one response — confirmed via production logs (2026-08-12)
+        // that 4096 was insufficient: stop_reason consistently came back "max_tokens", truncating the
+        // JSON mid-string on every attempt including the retry, wasting ~35-40s per failed call and
+        // pushing total request time past Hostinger's ~60s gateway timeout.
+        max_tokens: 8192,
         system: fetchSystemPrompt,
         messages: [
           { role: "user", content: fetchUserPrompt },
@@ -1125,6 +1218,9 @@ ${JSON.stringify(ANALYSIS_BY_KEY[vertConfig.key], null, 2)}`;
       });
       const textBlock = message.content.find((b) => b.type === "text");
       const rawContent = textBlock ? textBlock.text : "";
+      if (process.env.DEBUG_NARRATIVE === "true") {
+        console.error("DEBUG_NARRATIVE stop_reason=" + message.stop_reason + " output_tokens=" + message.usage?.output_tokens + " rawLength=" + rawContent.length + " last120=" + JSON.stringify(rawContent.slice(-120)));
+      }
       const jsonMatch = rawContent.match(/\{[\s\S]*\}/);
       return JSON.parse(jsonMatch ? jsonMatch[0] : rawContent);
     }
@@ -1149,41 +1245,9 @@ ${JSON.stringify(ANALYSIS_BY_KEY[vertConfig.key], null, 2)}`;
       }
     }
 
-    // Scores are authoritative from the deterministic crawl analysis whenever a real fetch succeeded.
-    // Non-measurable verticals (ppc/social/email) never get a fabricated numeric score.
-    const finalScores = {
-      seoScore: seoAnalysis?.seoScore ?? null,
-      aeoScore: aeoAnalysis?.aeoScore ?? null,
-      geoScore: geoAnalysis?.geoScore ?? null,
-      sentimentScore: sentimentAnalysis?.sentimentScore ?? null,
-    };
-    if (trimmedVertical !== "all") {
-      // Single-vertical runs only report the one relevant pillar — the other three stay null
-      // rather than implying a full 4-pillar audit ran.
-      Object.keys(finalScores).forEach((field) => {
-        if (SCORE_FIELD_BY_KEY[vertConfig.key] !== field) finalScores[field] = null;
-      });
-    }
-
-    const verticalScore = vertConfig.measurable && vertConfig.key
-      ? ANALYSIS_BY_KEY[vertConfig.key]?.[SCORE_FIELD_BY_KEY[vertConfig.key]] ?? null
-      : null;
-
-    const results = {
-      twittenceScore: trimmedVertical === "all"
-        ? computeUnifiedScore({
-            seo: { seoScore: finalScores.seoScore },
-            aeo: { aeoScore: finalScores.aeoScore },
-            geo: { geoScore: finalScores.geoScore },
-            sentiment: { sentimentScore: finalScores.sentimentScore },
-          })
-        : null,
-      ...finalScores,
-      vertical: trimmedVertical,
-      verticalMeasurable: vertConfig.measurable,
-      verticalScore,
-      externalBenchmark: externalBenchmark || null,
-      microMoment,
+    const finalResults = {
+      ...scoresOnlyResults,
+      narrativePending: false,
       narrativePartial,
       summary: narrative.summary ?? "Audit completed.",
       findings: narrative.findings ?? [],
@@ -1191,45 +1255,24 @@ ${JSON.stringify(ANALYSIS_BY_KEY[vertConfig.key], null, 2)}`;
       selfHealingPlan: narrative.selfHealingPlan ?? [],
     };
 
-    if (seoAnalysis) {
-      results.seoChecks = seoAnalysis;
-      results.aeoChecks = aeoAnalysis;
-      results.geoChecks = geoAnalysis;
-      results.sentimentChecks = sentimentAnalysis;
-      results.contentChecks = contentAnalysis;
-      results.localChecks = localAnalysis;
-    }
-
     await auditRef.set({
-      url: trimmedUrl,
-      topic: trimmedTopic,
-      vertical: trimmedVertical,
-      results: results,
-      twittenceScore: results.twittenceScore,
-      seoScore: results.seoScore,
-      aeoScore: results.aeoScore,
-      geoScore: results.geoScore,
-      sentimentScore: results.sentimentScore,
-      verticalScore: results.verticalScore,
-      verticalMeasurable: results.verticalMeasurable,
+      results: finalResults,
       status: "complete",
       auditPhase: "done",
-      createdAt: admin.firestore.FieldValue.serverTimestamp(),
-      uid: uid,
     }, { merge: true });
-
-    res.status(200).json({
-      auditId: auditRef.id,
-      results: results,
-    });
   } catch (error) {
-    console.error("Audit execution error:", error);
+    console.error(responseSent ? "Narrative generation background error:" : "Audit execution error:", error);
     if (auditRef) {
       try {
-        await auditRef.update({ status: "error", errorMessage: error.message });
+        await auditRef.update({ status: "error", errorMessage: error.message, "results.narrativePending": false });
       } catch (_) { /* ignore */ }
     }
-    res.status(500).json({ error: "An internal error occurred while processing the audit" });
+    // If the response already went out (error happened during background narrative generation), there
+    // is nothing left to send — the client is polling /api/audit-status instead. Only an error before
+    // that point still has a live response to reply to.
+    if (!responseSent) {
+      res.status(500).json({ error: "An internal error occurred while processing the audit" });
+    }
   }
 });
 
@@ -1337,6 +1380,22 @@ app.get("/api/output/llms-txt/:auditId", verifyToken, async (req, res) => {
   } catch (error) {
     console.error("llms.txt generation error:", error);
     res.status(500).json({ error: "Failed to generate llms.txt output" });
+  }
+});
+
+// Polled by the frontend after /api/run-audit returns its fast scores-only response, until the
+// background-generated narrative (findings/recommendations/self-healing plan) finishes and
+// results.narrativePending flips to false. See /api/run-audit's comments for why this exists.
+app.get("/api/audit-status/:auditId", verifyToken, async (req, res) => {
+  try {
+    const auditRef = db.collection("users").doc(req.user.uid).collection("audits").doc(req.params.auditId);
+    const doc = await auditRef.get();
+    if (!doc.exists) return res.status(404).json({ error: "Audit not found" });
+    const data = doc.data();
+    res.status(200).json({ status: data.status, results: data.results || null, errorMessage: data.errorMessage || null });
+  } catch (error) {
+    console.error("Audit status polling error:", error);
+    res.status(500).json({ error: "Failed to retrieve audit status" });
   }
 });
 

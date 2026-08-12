@@ -105,6 +105,54 @@ window.removeCitationKey = async () => {
   }
 };
 
+function extractAiOverviewText(provider, result) {
+  if (provider === "dataforseo") {
+    const items = result?.tasks?.[0]?.result?.[0]?.items || [];
+    const aio = items.find((i) => i.type === "ai_overview");
+    return aio?.markdown || null;
+  }
+  if (provider === "serpapi") {
+    const blocks = result?.ai_overview?.text_blocks;
+    if (Array.isArray(blocks) && blocks.length) {
+      return blocks.map((b) => b.snippet || b.text || "").filter(Boolean).join("\n\n");
+    }
+    return null;
+  }
+  return null;
+}
+
+window.runCitationCheck = async () => {
+  if (!currentUser) return showToast("Sign in first", "error");
+  const keyword = document.getElementById("citationCheckKeyword").value.trim();
+  const resultEl = document.getElementById("citationCheckResult");
+  if (!keyword) return showToast("Enter a keyword to check", "error");
+  resultEl.innerHTML = '<div class="status status-info">Checking live AI Overview data…</div>';
+  try {
+    const token = await currentUser.getIdToken();
+    const res = await fetch(`${API_BASE}/api/citation-check`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ keyword }),
+    });
+    const data = await res.json();
+    if (res.status === 402) {
+      resultEl.innerHTML = '<div class="status status-info">No credits or API key on file. <a href="#" onclick="buyCitationCredits();return false;">Buy credits</a> or add your own key above.</div>';
+      return;
+    }
+    if (!res.ok) throw new Error(data.error || "Citation check failed");
+
+    const overviewText = extractAiOverviewText(data.provider, data.result);
+    if (!overviewText) {
+      resultEl.innerHTML = '<div class="status status-info">No AI Overview is currently showing for this keyword — that itself is useful signal (nothing to be cited in yet, or Google isn’t triggering one for this query).</div>';
+      return;
+    }
+    const escaped = overviewText.replace(/</g, "&lt;").replace(/>/g, "&gt;");
+    resultEl.innerHTML = `<div class="status status-success" style="margin-bottom:.5rem">Live AI Overview found (via ${data.source === "byok" ? "your own key" : "credits"}, ${data.provider})</div><div class="output-card"><pre style="white-space:pre-wrap;font-family:var(--sans);font-size:.85rem">${escaped}</pre></div>`;
+  } catch (err) {
+    resultEl.innerHTML = `<div class="status status-error">Citation check failed: ${err.message}</div>`;
+  }
+};
+
 window.buyCitationCredits = async () => {
   if (!currentUser) return showToast("Sign in first", "error");
   try {
@@ -210,26 +258,27 @@ window.runBackendLoop = async () => {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Audit request failed");
 
+    // Scores arrive immediately (no Claude call needed for them); the narrative (findings,
+    // recommendations, self-healing plan) is generated in the background and polled for below — this
+    // keeps the request itself fast regardless of how long that generation takes, instead of one HTTP
+    // request having to survive the full worst case (confirmed live: up to ~90s for a full-vertical
+    // audit, longer than Hostinger's ~60s gateway timeout).
     setHS("audit", "done");
     showToast("Phase 1 — Audit: complete", "success", 2000);
-    setTimeout(() => setHS("research", "active"), 300);
-    setTimeout(() => {
-      setHS("research", "done");
-      setHS("fix", "active");
-      showToast("Phase 2 — Research: complete", "success", 2000);
-    }, 800);
-    setTimeout(() => {
-      setHS("fix", "done");
-      setHS("verify", "active");
-      showToast("Phase 3 — Fix: complete", "success", 2000);
-    }, 1300);
-    setTimeout(() => {
-      setHS("verify", "done");
-      showToast("Phase 4 — Verify: complete", "success", 2000);
-      renderResults(data.results, url, topic);
-    }, 1800);
+    setHS("research", "active");
+    renderResults(data.results, url, topic);
+    showStatus("Scores ready — generating findings and recommendations…", "info");
+    loading.style.display = "none";
+    setButtonLoading(btn, false);
 
-    showStatus("Audit complete — see results below.", "success");
+    if (data.results?.narrativePending) {
+      await pollForNarrative(data.auditId, url, topic, token);
+    } else {
+      setHS("research", "done");
+      setHS("fix", "done");
+      setHS("verify", "done");
+      showStatus("Audit complete — see results below.", "success");
+    }
     loadHistory(currentUser.uid);
   } catch (err) {
     showStatus("Audit failed: " + err.message, "error");
@@ -237,13 +286,51 @@ window.runBackendLoop = async () => {
     setHS("research", "");
     setHS("fix", "");
     setHS("verify", "");
-  } finally {
-    setTimeout(() => {
-      loading.style.display = "none";
-      setButtonLoading(btn, false);
-    }, 500);
+    loading.style.display = "none";
+    setButtonLoading(btn, false);
   }
 };
+
+async function pollForNarrative(auditId, url, topic, token) {
+  const maxAttempts = 40; // ~2 minutes at 3s intervals
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    await new Promise((resolve) => setTimeout(resolve, 3000));
+    try {
+      const res = await fetch(`${API_BASE}/api/audit-status/${auditId}`, {
+        headers: { Authorization: `Bearer ${token}` },
+      });
+      const data = await res.json();
+      if (!res.ok) throw new Error(data.error || "Could not check audit status");
+
+      if (data.status === "error") {
+        setHS("research", "");
+        setHS("fix", "");
+        setHS("verify", "");
+        showStatus("Audit failed: " + (data.errorMessage || "unknown error"), "error");
+        return;
+      }
+      if (data.results && !data.results.narrativePending) {
+        setHS("research", "done");
+        setHS("fix", "done");
+        setHS("verify", "done");
+        renderResults(data.results, url, topic);
+        showStatus("Audit complete — see results below.", "success");
+        showToast("Findings and recommendations ready", "success", 2500);
+        return;
+      }
+      // Still pending — nudge the visual progress so the wait doesn't look frozen.
+      if (attempt === 3) setHS("fix", "active");
+      if (attempt === 10) setHS("verify", "active");
+    } catch (err) {
+      // Transient poll failure — keep trying rather than aborting the whole wait on one bad request.
+      console.error("Poll attempt failed:", err.message);
+    }
+  }
+  showStatus(
+    "Scores are ready above, but generating the full findings/recommendations is taking longer than usual. Check Audit History below in a bit — it'll be there once ready.",
+    "info"
+  );
+}
 
 function showToast(msg, type, duration, isHtml) {
   const c = document.getElementById("toastContainer");
@@ -437,6 +524,8 @@ function renderResults(r, url, topic) {
     : "";
   const partialBanner = r.narrativePartial
     ? `<div class="status status-error" style="margin-bottom:1rem"><strong>AI narrative unavailable this run</strong> — the scores above are accurate (they come from the deterministic page crawl, not the AI), but findings, recommendations, and the self-healing plan couldn't be generated. Re-run the audit to get the full report.</div>`
+    : r.narrativePending
+    ? `<div class="status status-info" style="margin-bottom:1rem"><strong>Scores are final.</strong> Findings, recommendations, and the self-healing plan are still generating — this section will update automatically in a moment.</div>`
     : "";
 
   h += partialBanner + '<div class="report-shell"><div class="report-top"><span class="url">' +
@@ -449,6 +538,8 @@ function renderResults(r, url, topic) {
     h += r.findings
       .map((f, i) => `<li><span class="stripe ${i === 0 ? "crit" : stripeClass(s.tw)}"></span>${f}</li>`)
       .join("");
+  } else if (r.narrativePending) {
+    h += '<li><span class="stripe warn"></span>Generating findings…</li>';
   } else {
     h += '<li><span class="stripe ok"></span>No findings returned.</li>';
   }
@@ -468,6 +559,16 @@ function renderResults(r, url, topic) {
     '</div><div class="meta"><div class="site">' +
     (url || "") +
     `</div><div style="display:flex;gap:.5rem;margin-top:.5rem;flex-wrap:wrap"><button class="btn-ghost-sm" onclick="downloadReport('${reportFileBase}')">&#8681; Download Full Report</button></div></div></div>`;
+
+  const citationKeywordDefault = topic && topic !== "all" ? topic : "";
+  h += `<div style="margin-top:1.25rem"><h4>Check Live AI Citation <span class="badge" style="margin-left:.4rem">Optional</span></h4>
+    <p style="color:var(--text-dim);font-size:.85rem;margin:.35rem 0 .6rem">See whether this exact topic is currently being cited in Google's AI Overview right now — requires your own SERP API key or prepaid credits (set up above).</p>
+    <div style="display:flex;gap:.5rem;flex-wrap:wrap;align-items:center">
+      <input type="text" id="citationCheckKeyword" placeholder="Keyword or question to check" value="${citationKeywordDefault.replace(/"/g, "&quot;")}" style="flex:1 1 240px">
+      <button class="btn-ghost-sm" onclick="runCitationCheck()">Check now</button>
+    </div>
+    <div id="citationCheckResult" style="margin-top:.75rem"></div>
+  </div>`;
   if (r.selfHealingPlan?.length) {
     h += '<h4 style="margin-top:1.25rem">Self-Healing Plan</h4><div class="heal-steps">' +
       r.selfHealingPlan
