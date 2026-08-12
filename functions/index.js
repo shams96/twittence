@@ -12,12 +12,13 @@ const path = require("path");
 const fs = require("fs");
 const https = require("https");
 const http = require("http");
-const crypto = require("crypto");
 
 // Live citation tracking (Google AI Overview / ChatGPT / Perplexity) needs a paid third-party SERP
 // data provider — there's no free API for this. Both the "bring your own key" and "buy credits" paths
 // are inert until these are configured; nothing here fabricates data or fakes a working integration.
-const CITATION_ENCRYPTION_SECRET = process.env.CITATION_KEY_ENCRYPTION_SECRET;
+// BYOK keys are never persisted server-side at all (see the /api/citation-check route) — the
+// CITATION_KEY_ENCRYPTION_SECRET-based at-rest encryption this file used to do for that has been
+// removed entirely along with the Firestore fields it protected, not left in place as dead capability.
 const CITATION_PROVIDER_LOGIN = process.env.CITATION_PROVIDER_LOGIN; // Twittence's own DataForSEO login (managed/credits path)
 const CITATION_PROVIDER_PASSWORD = process.env.CITATION_PROVIDER_PASSWORD;
 const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
@@ -25,25 +26,6 @@ const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 const CREDIT_PACK_PRICE_USD = Number(process.env.CREDIT_PACK_PRICE_USD || 9);
 const CREDIT_PACK_SIZE = Number(process.env.CREDIT_PACK_SIZE || 10);
 const stripe = STRIPE_SECRET_KEY ? require("stripe")(STRIPE_SECRET_KEY) : null;
-
-function encryptSecret(plaintext) {
-  if (!CITATION_ENCRYPTION_SECRET) throw new Error("CITATION_KEY_ENCRYPTION_SECRET is not configured");
-  const key = crypto.scryptSync(CITATION_ENCRYPTION_SECRET, "twittence-citation-salt", 32);
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
-  const ciphertext = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
-  const authTag = cipher.getAuthTag();
-  return [iv.toString("base64"), authTag.toString("base64"), ciphertext.toString("base64")].join(":");
-}
-
-function decryptSecret(stored) {
-  if (!CITATION_ENCRYPTION_SECRET) throw new Error("CITATION_KEY_ENCRYPTION_SECRET is not configured");
-  const [ivB64, authTagB64, ciphertextB64] = stored.split(":");
-  const key = crypto.scryptSync(CITATION_ENCRYPTION_SECRET, "twittence-citation-salt", 32);
-  const decipher = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(ivB64, "base64"));
-  decipher.setAuthTag(Buffer.from(authTagB64, "base64"));
-  return Buffer.concat([decipher.update(Buffer.from(ciphertextB64, "base64")), decipher.final()]).toString("utf8");
-}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -1520,19 +1502,24 @@ app.post("/api/site-wide-audit", verifyToken, async (req, res) => {
 });
 
 // --- Live citation tracking: hybrid BYOK / managed-credits model ---
-// BYOK: the user's own DataForSEO or SerpApi key, encrypted at rest, never returned to the client
-// after saving, never billed by Twittence. Managed: prepaid credits purchased via Stripe, consumed
-// against Twittence's own provider account. Every route here requires a signed-in user (verifyToken)
-// — there is no anonymous access to this feature, since it's either spending the user's own key or
-// their paid balance.
+// BYOK: the user's own DataForSEO or SerpApi key. This server NEVER persists it — no Firestore write,
+// no disk write, not even briefly. The browser holds it in sessionStorage (wiped automatically by the
+// browser itself when the tab/window closes — a platform-enforced guarantee, not something server
+// code has to get right on every code path) and sends it with each /api/citation-check request. The
+// server uses it in-memory for that single request only and it is garbage-collected once the request
+// finishes; nothing here can leak it into a database dump, a backup, or an admin console because it
+// was never written anywhere in the first place. An earlier version of this feature persisted an
+// encrypted copy in Firestore — replaced entirely, not left as an option, because "sometimes
+// persisted, sometimes not" is a worse and more confusing guarantee than "never persisted."
+// Managed: prepaid credits purchased via Stripe, consumed against Twittence's own provider account.
+// Every route here requires a signed-in user (verifyToken) — no anonymous access, since it's either
+// passing through the user's own key or spending their paid balance.
 
 app.get("/api/citation/status", verifyToken, async (req, res) => {
   try {
     const doc = await db.collection("users").doc(req.user.uid).get();
     const data = doc.exists ? doc.data() : {};
     res.status(200).json({
-      hasByok: Boolean(data.citationApiKey),
-      byokProvider: data.citationApiProvider || null,
       credits: data.citationCredits || 0,
       managedAvailable: Boolean(CITATION_PROVIDER_LOGIN && CITATION_PROVIDER_PASSWORD),
       billingConfigured: Boolean(stripe),
@@ -1540,50 +1527,6 @@ app.get("/api/citation/status", verifyToken, async (req, res) => {
   } catch (error) {
     console.error("Citation status error:", error);
     res.status(500).json({ error: "Failed to retrieve citation status" });
-  }
-});
-
-app.post("/api/citation/key", verifyToken, async (req, res) => {
-  if (!CITATION_ENCRYPTION_SECRET) {
-    return res.status(503).json({ error: "This deployment has not configured key storage yet. Contact support." });
-  }
-  const { provider, apiKey, apiSecret } = req.body;
-  if (!["dataforseo", "serpapi"].includes(provider)) {
-    return res.status(400).json({ error: "provider must be 'dataforseo' or 'serpapi'" });
-  }
-  if (!apiKey || typeof apiKey !== "string" || apiKey.trim().length < 8) {
-    return res.status(400).json({ error: "A valid apiKey is required" });
-  }
-  if (provider === "dataforseo" && (!apiSecret || typeof apiSecret !== "string")) {
-    return res.status(400).json({ error: "DataForSEO requires both apiKey (login) and apiSecret (password)" });
-  }
-  try {
-    await db.collection("users").doc(req.user.uid).set(
-      {
-        citationApiProvider: provider,
-        citationApiKey: encryptSecret(apiKey.trim()),
-        citationApiSecret: apiSecret ? encryptSecret(apiSecret.trim()) : admin.firestore.FieldValue.delete(),
-      },
-      { merge: true }
-    );
-    res.status(200).json({ saved: true });
-  } catch (error) {
-    console.error("Citation key save error:", error);
-    res.status(500).json({ error: "Failed to save API key" });
-  }
-});
-
-app.delete("/api/citation/key", verifyToken, async (req, res) => {
-  try {
-    await db.collection("users").doc(req.user.uid).update({
-      citationApiProvider: admin.firestore.FieldValue.delete(),
-      citationApiKey: admin.firestore.FieldValue.delete(),
-      citationApiSecret: admin.firestore.FieldValue.delete(),
-    });
-    res.status(200).json({ deleted: true });
-  } catch (error) {
-    console.error("Citation key delete error:", error);
-    res.status(500).json({ error: "Failed to remove API key" });
   }
 });
 
@@ -1663,24 +1606,25 @@ async function fetchSerpApiAiOverview(apiKey, keyword) {
 }
 
 app.post("/api/citation-check", verifyToken, async (req, res) => {
-  const { keyword } = req.body;
+  const { keyword, byokProvider, byokApiKey, byokApiSecret } = req.body;
   if (!keyword || typeof keyword !== "string" || !keyword.trim()) {
     return res.status(400).json({ error: "keyword is required" });
   }
   const userRef = db.collection("users").doc(req.user.uid);
-  const userDoc = await userRef.get();
-  const userData = userDoc.exists ? userDoc.data() : {};
 
   try {
-    // Path 1: BYOK — the user's own key, no credit deduction, Twittence never sees the plaintext key
-    // outside this request's memory.
-    if (userData.citationApiKey && userData.citationApiProvider) {
-      const apiKey = decryptSecret(userData.citationApiKey);
-      const provider = userData.citationApiProvider;
-      const result = provider === "dataforseo"
-        ? await fetchDataForSeoAiOverview(apiKey, decryptSecret(userData.citationApiSecret), keyword.trim())
-        : await fetchSerpApiAiOverview(apiKey, keyword.trim());
-      return res.status(200).json({ source: "byok", provider, result });
+    // Path 1: BYOK — the user's own key, sent fresh with this one request from the browser's
+    // sessionStorage. Never read from or written to Firestore, never touches disk: it exists only in
+    // this function's local variables for the lifetime of this single request, then is garbage
+    // collected like any other local variable. No credit deduction, since it's the user's own key.
+    if (byokProvider && byokApiKey) {
+      if (!["dataforseo", "serpapi"].includes(byokProvider)) {
+        return res.status(400).json({ error: "byokProvider must be 'dataforseo' or 'serpapi'" });
+      }
+      const result = byokProvider === "dataforseo"
+        ? await fetchDataForSeoAiOverview(byokApiKey, byokApiSecret, keyword.trim())
+        : await fetchSerpApiAiOverview(byokApiKey, keyword.trim());
+      return res.status(200).json({ source: "byok", provider: byokProvider, result });
     }
 
     // Path 2: managed credits — deducted atomically so two concurrent requests can't both succeed

@@ -20,6 +20,27 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 let currentUser = null;
 
+// BYOK (bring-your-own citation API key) lives ONLY here — sessionStorage, never sent to our server
+// for storage, never written to a database. The browser itself wipes sessionStorage when the tab or
+// window closes, which is what makes "removed once the session is over" an actual guarantee rather
+// than a promise our code has to keep on every path. It's also explicitly cleared on sign-out below,
+// as a second, deliberate guarantee independent of tab lifetime (shared/public computer scenario).
+const BYOK_STORAGE_KEY = "twittence_byok";
+function getByok() {
+  try {
+    const raw = sessionStorage.getItem(BYOK_STORAGE_KEY);
+    return raw ? JSON.parse(raw) : null;
+  } catch (_) {
+    return null;
+  }
+}
+function setByok(provider, apiKey, apiSecret) {
+  sessionStorage.setItem(BYOK_STORAGE_KEY, JSON.stringify({ provider, apiKey, apiSecret: apiSecret || null }));
+}
+function clearByok() {
+  sessionStorage.removeItem(BYOK_STORAGE_KEY);
+}
+
 onAuthStateChanged(auth, async (user) => {
   currentUser = user;
   const authBtn = document.getElementById("authBtn");
@@ -35,6 +56,7 @@ onAuthStateChanged(auth, async (user) => {
     userEmail.classList.add("hidden");
     document.getElementById("citationPanel").classList.add("hidden");
     document.getElementById("citationStatus").textContent = "Sign in to check your citation tracking status.";
+    clearByok();
   }
 });
 
@@ -42,15 +64,16 @@ async function loadCitationStatus() {
   if (!currentUser) return;
   const statusEl = document.getElementById("citationStatus");
   const panel = document.getElementById("citationPanel");
+  const byok = getByok();
   try {
     const token = await currentUser.getIdToken();
     const res = await fetch(`${API_BASE}/api/citation/status`, { headers: { Authorization: `Bearer ${token}` } });
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Could not load citation status");
     panel.classList.remove("hidden");
-    if (data.hasByok) {
+    if (byok) {
       statusEl.className = "status status-success";
-      statusEl.textContent = `Using your own ${data.byokProvider} API key — no credits charged.`;
+      statusEl.textContent = `Using your own ${byok.provider} API key for this session — no credits charged, key never sent to our servers for storage.`;
     } else if (data.credits > 0) {
       statusEl.className = "status status-success";
       statusEl.textContent = `${data.credits} citation check credit${data.credits === 1 ? "" : "s"} remaining.`;
@@ -59,7 +82,7 @@ async function loadCitationStatus() {
       statusEl.textContent = "Live citation tracking isn't fully set up on this deployment yet — bring your own API key below to use it now.";
     } else {
       statusEl.className = "status status-info";
-      statusEl.textContent = "No API key or credits on file. Add your own key (free) or buy credits below.";
+      statusEl.textContent = "No API key set for this session and no credits on file. Add your own key (free) or buy credits below.";
     }
   } catch (err) {
     statusEl.className = "status status-error";
@@ -67,42 +90,28 @@ async function loadCitationStatus() {
   }
 }
 
-window.saveCitationKey = async () => {
+// The key never leaves the browser for storage purposes — it's held only in sessionStorage, which
+// the browser itself clears when the tab/window closes. Nothing is sent to our server here at all;
+// "saving" is a purely local, client-side action. It's only ever transmitted later, per citation
+// check request, for one-time in-memory use (see runCitationCheck / the server's /api/citation-check).
+window.saveCitationKey = () => {
   if (!currentUser) return showToast("Sign in first", "error");
   const provider = document.getElementById("citationProvider").value;
   const apiKey = document.getElementById("citationApiKey").value.trim();
   const apiSecret = document.getElementById("citationApiSecret").value.trim();
   if (!apiKey) return showToast("Enter an API key first", "error");
-  try {
-    const token = await currentUser.getIdToken();
-    const res = await fetch(`${API_BASE}/api/citation/key`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ provider, apiKey, apiSecret: apiSecret || undefined }),
-    });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Failed to save key");
-    document.getElementById("citationApiKey").value = "";
-    document.getElementById("citationApiSecret").value = "";
-    showToast("API key saved", "success");
-    loadCitationStatus();
-  } catch (err) {
-    showToast("Save failed: " + err.message, "error");
-  }
+  if (provider === "dataforseo" && !apiSecret) return showToast("DataForSEO needs both the login (API Key field) and password (API Secret field)", "error");
+  setByok(provider, apiKey, apiSecret || null);
+  document.getElementById("citationApiKey").value = "";
+  document.getElementById("citationApiSecret").value = "";
+  showToast("API key set for this session (not stored on our servers)", "success");
+  loadCitationStatus();
 };
 
-window.removeCitationKey = async () => {
-  if (!currentUser) return;
-  try {
-    const token = await currentUser.getIdToken();
-    const res = await fetch(`${API_BASE}/api/citation/key`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
-    const data = await res.json();
-    if (!res.ok) throw new Error(data.error || "Failed to remove key");
-    showToast("API key removed", "success");
-    loadCitationStatus();
-  } catch (err) {
-    showToast("Remove failed: " + err.message, "error");
-  }
+window.removeCitationKey = () => {
+  clearByok();
+  showToast("API key cleared", "success");
+  loadCitationStatus();
 };
 
 function extractAiOverviewText(provider, result) {
@@ -129,10 +138,14 @@ window.runCitationCheck = async () => {
   resultEl.innerHTML = '<div class="status status-info">Checking live AI Overview data…</div>';
   try {
     const token = await currentUser.getIdToken();
+    const byok = getByok();
     const res = await fetch(`${API_BASE}/api/citation-check`, {
       method: "POST",
       headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-      body: JSON.stringify({ keyword }),
+      body: JSON.stringify({
+        keyword,
+        ...(byok ? { byokProvider: byok.provider, byokApiKey: byok.apiKey, byokApiSecret: byok.apiSecret } : {}),
+      }),
     });
     const data = await res.json();
     if (res.status === 402) {
