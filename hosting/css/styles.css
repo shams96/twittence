@@ -103,6 +103,10 @@ section{padding:3rem 0}
 label{display:block;font-weight:600;margin-bottom:0.3rem;font-size:0.85rem;color:var(--text)}
 input,select{width:100%;padding:0.6rem 0.75rem;border:1px solid var(--line);border-radius:8px;font-size:0.92rem;background:var(--ink);color:var(--text);font-family:var(--sans);transition:border-color 0.2s}
 input:focus,select:focus{outline:none;border-color:var(--brass);box-shadow:0 0 0 3px color-mix(in srgb, var(--brass) 18%, transparent)}
+input.field-saved{border-color:var(--ok);box-shadow:0 0 0 3px color-mix(in srgb, var(--ok) 18%, transparent);transition:border-color 0.3s,box-shadow 0.3s}
+.mini-steps{display:flex;flex-direction:column;gap:.5rem;margin:.75rem 0}
+.mini-steps .ms-step{display:flex;gap:.6rem;align-items:flex-start;font-size:.8rem;color:var(--text-dim)}
+.mini-steps .ms-num{flex-shrink:0;width:1.4rem;height:1.4rem;border-radius:50%;background:var(--panel-2);border:1px solid var(--line);display:flex;align-items:center;justify-content:center;font-family:var(--mono);font-size:.7rem;color:var(--brass-bright);font-weight:700}
 select option{background:var(--ink);color:var(--text)}
 .btn-action{background:var(--brass);color:var(--ink);border:none;padding:0.85rem 1.5rem;border-radius:8px;font-size:1rem;font-weight:700;cursor:pointer;width:100%;transition:all 0.2s;margin-top:0.5rem;font-family:var(--sans)}
 .btn-action:hover{background:var(--brass-bright);transform:translateY(-1px);box-shadow:0 4px 20px color-mix(in srgb, var(--brass) 30%, transparent)}

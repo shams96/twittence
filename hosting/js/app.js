@@ -63,11 +63,18 @@ onAuthStateChanged(auth, async (user) => {
   }
 });
 
+function syncByokBadge() {
+  const badge = document.getElementById("citationKeySavedBadge");
+  if (!badge) return;
+  badge.classList.toggle("hidden", !getByok());
+}
+
 async function loadCitationStatus() {
   if (!currentUser) return;
   const statusEl = document.getElementById("citationStatus");
   const panel = document.getElementById("citationPanel");
   const byok = getByok();
+  syncByokBadge();
   try {
     const token = await currentUser.getIdToken();
     const res = await fetch(`${API_BASE}/api/citation/status`, { headers: { Authorization: `Bearer ${token}` } });
@@ -105,8 +112,17 @@ window.saveCitationKey = () => {
   if (!apiKey) return showToast("Enter an API key first", "error");
   if (provider === "dataforseo" && !apiSecret) return showToast("DataForSEO needs both the login (API Key field) and password (API Secret field)", "error");
   setByok(provider, apiKey, apiSecret || null);
-  document.getElementById("citationApiKey").value = "";
-  document.getElementById("citationApiSecret").value = "";
+  const keyField = document.getElementById("citationApiKey");
+  const secretField = document.getElementById("citationApiSecret");
+  // Brief green flash on the fields being saved, then clear them so the plaintext key doesn't linger
+  // visible in the DOM afterward — the flash itself is the visual confirmation "does this change
+  // color" asked about, since a since-cleared field can't stay colored without looking broken.
+  [keyField, secretField].forEach((el) => el.classList.add("field-saved"));
+  setTimeout(() => {
+    keyField.value = "";
+    secretField.value = "";
+    [keyField, secretField].forEach((el) => el.classList.remove("field-saved"));
+  }, 600);
   showToast("API key saved in this browser (not stored on our servers)", "success");
   loadCitationStatus();
 };

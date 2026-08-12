@@ -157,11 +157,16 @@
   <p style="margin-bottom:1rem;color:var(--text-dim);font-size:.8rem"><strong>Your key never touches our servers for storage.</strong> It's saved only in this browser, sent per-request for one-time use only, and cleared automatically the moment you sign out. We never write it to a database.</p>
   <div id="citationStatus" class="status status-info" style="margin-bottom:1rem">Sign in to check your citation tracking status.</div>
   <div id="citationPanel" class="hidden">
+    <div class="mini-steps">
+      <div class="ms-step"><span class="ms-num">1</span><span>Paste your DataForSEO or SerpApi key below and click <strong>Save my API key</strong> — it's saved only in this browser, not sent to us to store.</span></div>
+      <div class="ms-step"><span class="ms-num">2</span><span>Enter a keyword in the report below and click <strong>Check now</strong> — the key is sent with just that one request, used once, then discarded server-side.</span></div>
+      <div class="ms-step"><span class="ms-num">3</span><span>Sign out (or click <strong>Remove saved key</strong>) any time to wipe it from this browser immediately.</span></div>
+    </div>
     <div class="form-grid">
       <div class="form-group"><label for="citationProvider">Provider (bring your own key)</label>
         <select id="citationProvider"><option value="dataforseo">DataForSEO</option><option value="serpapi">SerpApi</option></select>
       </div>
-      <div class="form-group"><label for="citationApiKey">API Key (login, for DataForSEO)</label><input type="password" id="citationApiKey" placeholder="Your API key"></div>
+      <div class="form-group"><label for="citationApiKey">API Key (login, for DataForSEO) <span id="citationKeySavedBadge" class="badge hidden" style="margin-left:.3rem;font-size:.65rem">&#10003; Saved</span></label><input type="password" id="citationApiKey" placeholder="Your API key"></div>
       <div class="form-group" id="citationSecretGroup"><label for="citationApiSecret">API Secret (password, DataForSEO only)</label><input type="password" id="citationApiSecret" placeholder="Required for DataForSEO"></div>
     </div>
     <p style="margin:.4rem 0 0;color:var(--text-dim);font-size:.75rem">Saved to this browser only — never sent to our servers to store. Stays saved across reloads while you're signed in; <strong>cleared automatically the moment you sign out</strong> (not just when you close the tab).</p>
