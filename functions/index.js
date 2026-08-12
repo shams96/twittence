@@ -552,6 +552,36 @@ function analyzeFaqQuality($) {
   return { hasFAQ, totalQuestions, wellSizedAnswers };
 }
 
+// GEO Layer-1 signal: "information gain" — original/proprietary data and specific figures an LLM
+// can't already synthesize from web consensus (a named study, "we surveyed N", a specific %/stat)
+// beats generic restated claims. Business-agnostic: triggers on the language pattern, not a vertical.
+function hasOriginalDataSignal(bodyText) {
+  const originalDataLanguage = /\bwe (surveyed|tested|analyzed|studied)\b|\bour (research|study|data|analysis) (shows?|found|reveals?)\b|\bproprietary\b|\bin a study of\b|\bproprietary data\b|\bfirst-party data\b|\bexclusive data\b/i.test(bodyText);
+  const statMatches = bodyText.match(/\b\d+(\.\d+)?%|\b\d{2,}\s*(participants|users|patients|respondents|customers|studies)\b/gi) || [];
+  return { hasOriginalDataLanguage: originalDataLanguage, statDensity: statMatches.length };
+}
+
+// GEO Layer-1 signal: scannability — tables and well-formed lists are what RAG/snippet extraction
+// lifts cleanly; dense unbroken paragraphs are not.
+function analyzeScannability($) {
+  const hasTable = $("table").length > 0;
+  const listItems = $("li").length;
+  const paragraphs = $("p").length;
+  const hasGoodListDensity = listItems >= 3 && listItems >= paragraphs * 0.3;
+  return { hasTable, listItems, hasGoodListDensity };
+}
+
+// GEO Layer-1 signal: authoritative citations & clinical/expert signal — external links to
+// high-trust reference domains, and language patterns for expert/clinical attribution. Auto-detected
+// from content so it applies equally to a cited Gartner stat on a SaaS page or a dermatologist quote
+// on a skincare page — no vertical hardcoding, per the engine's business-agnostic design.
+function analyzeAuthoritativeCitations($, bodyText) {
+  const citationLinkPattern = /\.gov\/|\.edu\/|pubmed\.ncbi|doi\.org|scholar\.google/i;
+  const externalCitationLinks = $("a[href]").toArray().filter((el) => citationLinkPattern.test($(el).attr("href") || "")).length;
+  const hasExpertOrClinicalLanguage = /\bdr\.\s|\bdermatologist\b|\bclinically (proven|tested)\b|\bpeer-review(ed)?\b|\bclinical (trial|study)\b|\bpublished in\b|\baccording to (a |the )?(study|research|report)\b|\bmd\b,|\bphd\b/i.test(bodyText);
+  return { externalCitationLinks, hasExpertOrClinicalLanguage };
+}
+
 function detectSchemaTypes($) {
   const types = new Set();
   $("script[type='application/ld+json']").each((_, el) => {
@@ -580,6 +610,9 @@ function analyzeGeo($, html, url, topic) {
 
   const pageText = $("body").text() || "";
   const wordCount = pageText.split(/\s+/).filter((w) => w.length > 2).length;
+  const originalData = hasOriginalDataSignal(pageText);
+  const scannability = analyzeScannability($);
+  const citations = analyzeAuthoritativeCitations($, pageText);
 
   // Kept as informational context only (surfaced to findings/recommendations), not a scoring
   // input — "does this page even seem to be about the stated topic" is a sanity check, not the
@@ -618,16 +651,37 @@ function analyzeGeo($, html, url, topic) {
     hasDateModified: authority.hasDateModified,
     isRecentlyUpdated: authority.isRecentlyUpdated,
     topicRelevance: Math.min(100, Math.round((topicKeywordsPresent / Math.max(topicWords.length, 1)) * 100)),
+    hasOriginalDataLanguage: originalData.hasOriginalDataLanguage,
+    statDensity: originalData.statDensity,
+    hasTable: scannability.hasTable,
+    hasGoodListDensity: scannability.hasGoodListDensity,
+    externalCitationLinks: citations.externalCitationLinks,
+    hasExpertOrClinicalLanguage: citations.hasExpertOrClinicalLanguage,
   };
 
+  // Six-dimension rebalance (100 pts total) covering the full GEO Layer-1 rubric: Direct Answer &
+  // Structure, Information Gain, Schema Clarity, Authoritative Citations, Scannability, Freshness —
+  // FAQ/schema/heading signals folded in rather than scored standalone to avoid double-counting.
   let geoScore = 0;
-  geoScore += checks.hasEarlyDirectAnswer ? 20 : 0;
-  geoScore += Math.min(20, Math.round(checks.questionHeadingRatio * 0.2));
-  geoScore += checks.hasFAQSchema
-    ? Math.min(20, 8 + Math.round((checks.faqWellSizedAnswers / Math.max(checks.faqQuestionCount, 1)) * 12))
-    : 0;
-  geoScore += (checks.hasFAQSchema ? 6 : 0) + (checks.hasHowToSchema ? 5 : 0) + (checks.hasArticleSchema ? 4 : 0);
-  geoScore += (checks.hasDatePublished ? 8 : 0) + (checks.isRecentlyUpdated ? 7 : 0);
+  // A) Direct Answer & Structure — 20
+  geoScore += checks.hasEarlyDirectAnswer ? 12 : 0;
+  geoScore += Math.min(8, Math.round(checks.questionHeadingRatio * 0.08));
+  // B) Information Gain / Original Data — 15
+  geoScore += checks.hasOriginalDataLanguage ? 10 : 0;
+  geoScore += Math.min(5, checks.statDensity);
+  // C) Schema & Structural Clarity — 15
+  geoScore += (checks.hasFAQSchema ? 6 : 0) + (checks.hasHowToSchema ? 4 : 0) + (checks.hasArticleSchema ? 3 : 0);
+  geoScore += checks.hasFAQSchema ? Math.round((checks.faqWellSizedAnswers / Math.max(checks.faqQuestionCount, 1)) * 2) : 0;
+  // D) Authoritative Entities & Citations — 20
+  geoScore += (checks.hasAuthor ? 5 : 0) + (checks.authorHasExternalLink ? 3 : 0);
+  geoScore += Math.min(7, checks.externalCitationLinks * 2);
+  geoScore += checks.hasExpertOrClinicalLanguage ? 5 : 0;
+  // E) Scannability & Formatting — 15
+  geoScore += checks.hasTable ? 6 : 0;
+  geoScore += checks.hasGoodListDensity ? 6 : 0;
+  geoScore += wordCount > 300 ? 3 : 0;
+  // F) Freshness — 15
+  geoScore += (checks.hasDatePublished ? 7 : 0) + (checks.isRecentlyUpdated ? 8 : 0);
   geoScore += (checks.hasAuthor ? 6 : 0) + (checks.authorHasExternalLink ? 4 : 0);
   checks.geoScore = Math.min(100, geoScore);
   return checks;
@@ -956,6 +1010,10 @@ Ground your reasoning in how AI search actually works, not outdated keyword-rank
 - What drives AI citation: content that leads with a direct answer in the first ~200 words, headings phrased as the literal question a user would ask, FAQ answers sized for extraction (roughly 40-160 words each), named-author attribution, and recent "last updated" freshness signals.
 - For local/service businesses specifically, proximity-based "near me" ranking is being displaced by attribute-matching (pricing specifics, who a service is/isn't a good fit for, specific problem/symptom content, comparison content) — this is a live, recent shift, not a hypothetical.
 - Most of what AI cites for a given query comes from outside the brand's own site (review platforms, forums, third-party roundups) — when a page's on-page signals are strong but you have no way to verify off-site presence, say so explicitly and recommend the business audit its presence on relevant review platforms rather than implying on-page work alone is sufficient.
+- "Information gain" beats restated consensus: original data, first-party statistics, and specific proprietary findings are what an LLM can't already synthesize from the rest of the web. Generic claims that just restate common knowledge are citation-neutral even if well-written.
+- Citation displacement framing: you do not have live data on what Google AI Overviews, ChatGPT, or Perplexity are currently citing for this topic (that requires a paid SERP data feed this tool doesn't have) — never claim to know current citation status or name a specific competitor as "the current winner." Instead, reason from the evidence about what a generic AI-citable source in this space would need (a direct answer, named data, expert/clinical attribution, extractable structure) and frame recommendations as closing that gap, not as displacing a named source you haven't actually observed.
+- When the evidence shows expert/clinical language, external citation links, or original-data signals already present, treat that as a real strength to call out by name in findings — don't undersell genuine authority signals just because the score isn't 100.
+- Structure the selfHealingPlan phases to mirror the AI-answer format proven to get extracted: a phase for tightening the direct-answer opening, a phase for adding scannable structure (tables/lists) if missing, a phase for authority/citation signals if missing, and a phase for FAQ/schema if missing — skip any phase the evidence shows is already strong.
 
 Never invent a score that contradicts the supplied analysis, and never invent a score for something the evidence doesn't cover. Respond with ONLY valid JSON, no markdown fences, no commentary, matching this shape:
 {"summary": string, "findings": string[], "recommendations": string[], "selfHealingPlan": [{"phase": string, "description": string}]}`;
