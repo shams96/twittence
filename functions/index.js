@@ -729,15 +729,52 @@ function analyzeLocalAttributeContent(bodyText) {
   };
 }
 
+// "Local" relevance splits into two structurally different models, and a business-agnostic engine
+// can't assume which one applies: (1) own-location businesses (a plumber, a dentist) where the
+// business itself is the place someone travels to, vs. (2) DTC/product brands with no storefront of
+// their own, whose local relevance is "where can someone buy this near them" via third-party
+// retailers — the model Google's Local Inventory Ads / "See what's in store" is built around, keyed
+// off Schema.org Offer.availableAtOrFrom. A skincare DTC brand stocked at a retailer and a local
+// HVAC company are both legitimately "strong on local" but via entirely different signals — score
+// both signal groups and let whichever applies actually count, rather than assuming one model.
+function analyzeRetailAvailability($, bodyText) {
+  const stockistLinkPattern = /store.?locator|find.{0,3}(a )?store|find.{0,3}in.?store|find.{0,3}us|stockists?|where.?to.?buy|retail.?locations?|carried.?at|find.?a.?retailer/i;
+  const hasStockistLink = $("a").toArray().some((el) => {
+    const href = $(el).attr("href") || "";
+    const text = $(el).text() || "";
+    return stockistLinkPattern.test(href) || stockistLinkPattern.test(text);
+  });
+
+  const hasRetailAvailabilityLanguage = /\b(available|carried|sold|now in stores?|find (it|us)) at\b|\bin stores? near you\b|\bauthorized (retailer|dealer)s?\b|\bstockists?\b/i.test(bodyText);
+
+  let hasAvailableAtOrFromSchema = false;
+  let hasMultiSellerOffers = false;
+  $("script[type='application/ld+json']").each((_, el) => {
+    try {
+      const json = JSON.parse($(el).html());
+      const items = Array.isArray(json) ? json : [json];
+      for (const item of items) {
+        const offers = Array.isArray(item.offers) ? item.offers : item.offers ? [item.offers] : [];
+        if (offers.some((o) => o && o.availableAtOrFrom)) hasAvailableAtOrFromSchema = true;
+        if (offers.length > 1 || offers.some((o) => o && Array.isArray(o.seller))) hasMultiSellerOffers = true;
+      }
+    } catch (_) { /* skip invalid JSON-LD */ }
+  });
+
+  return { hasStockistLink, hasRetailAvailabilityLanguage, hasAvailableAtOrFromSchema, hasMultiSellerOffers };
+}
+
 function analyzeLocal($, html) {
   const bodyText = $("body").text() || "";
   const attributeContent = analyzeLocalAttributeContent(bodyText);
+  const retailAvailability = analyzeRetailAvailability($, bodyText);
   const checks = {
     hasPhoneNumber: /\(?\d{3}\)?[\s.-]?\d{3}[\s.-]?\d{4}/.test(bodyText),
     hasAddressPattern: /\d{1,5}\s+[\w\s]{2,30}\s+(street|st|avenue|ave|road|rd|boulevard|blvd|drive|dr|lane|ln)\b/i.test(bodyText),
     hasLocalBusinessSchema: false,
     hasMapEmbed: $("iframe[src*='google.com/maps'], iframe[src*='maps.google']").length > 0,
     ...attributeContent,
+    ...retailAvailability,
   };
   $("script[type='application/ld+json']").each((_, el) => {
     try {
@@ -749,16 +786,30 @@ function analyzeLocal($, html) {
     } catch (_) { /* skip invalid JSON-LD */ }
   });
 
-  let localScore = 0;
-  if (checks.hasPhoneNumber) localScore += 15;
-  if (checks.hasAddressPattern) localScore += 15;
-  if (checks.hasLocalBusinessSchema) localScore += 20;
-  if (checks.hasMapEmbed) localScore += 10;
-  if (checks.hasPricingContent) localScore += 15;
-  if (checks.hasFitGuidance) localScore += 10;
-  if (checks.hasProblemContent) localScore += 10;
-  if (checks.hasComparisonContent) localScore += 5;
-  checks.localScore = Math.min(100, localScore);
+  // Own-location signals (max 35) — a physical business people travel to.
+  let ownLocationScore = 0;
+  if (checks.hasPhoneNumber) ownLocationScore += 10;
+  if (checks.hasAddressPattern) ownLocationScore += 10;
+  if (checks.hasLocalBusinessSchema) ownLocationScore += 10;
+  if (checks.hasMapEmbed) ownLocationScore += 5;
+
+  // Retail-availability signals (max 35) — "find near you" via a third-party retailer, the DTC model.
+  let retailScore = 0;
+  if (checks.hasStockistLink) retailScore += 15;
+  if (checks.hasAvailableAtOrFromSchema) retailScore += 12;
+  if (checks.hasMultiSellerOffers) retailScore += 3;
+  if (checks.hasRetailAvailabilityLanguage) retailScore += 5;
+
+  // Attribute-rich "trust content" signals (max 30) — apply regardless of which local model fits.
+  let attributeScore = 0;
+  if (checks.hasPricingContent) attributeScore += 10;
+  if (checks.hasFitGuidance) attributeScore += 8;
+  if (checks.hasProblemContent) attributeScore += 7;
+  if (checks.hasComparisonContent) attributeScore += 5;
+
+  checks.ownLocationScore = ownLocationScore;
+  checks.retailAvailabilityScore = retailScore;
+  checks.localScore = Math.min(100, ownLocationScore + retailScore + attributeScore);
   return checks;
 }
 
