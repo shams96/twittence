@@ -12,6 +12,38 @@ const path = require("path");
 const fs = require("fs");
 const https = require("https");
 const http = require("http");
+const crypto = require("crypto");
+
+// Live citation tracking (Google AI Overview / ChatGPT / Perplexity) needs a paid third-party SERP
+// data provider — there's no free API for this. Both the "bring your own key" and "buy credits" paths
+// are inert until these are configured; nothing here fabricates data or fakes a working integration.
+const CITATION_ENCRYPTION_SECRET = process.env.CITATION_KEY_ENCRYPTION_SECRET;
+const CITATION_PROVIDER_LOGIN = process.env.CITATION_PROVIDER_LOGIN; // Twittence's own DataForSEO login (managed/credits path)
+const CITATION_PROVIDER_PASSWORD = process.env.CITATION_PROVIDER_PASSWORD;
+const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY;
+const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
+const CREDIT_PACK_PRICE_USD = Number(process.env.CREDIT_PACK_PRICE_USD || 9);
+const CREDIT_PACK_SIZE = Number(process.env.CREDIT_PACK_SIZE || 10);
+const stripe = STRIPE_SECRET_KEY ? require("stripe")(STRIPE_SECRET_KEY) : null;
+
+function encryptSecret(plaintext) {
+  if (!CITATION_ENCRYPTION_SECRET) throw new Error("CITATION_KEY_ENCRYPTION_SECRET is not configured");
+  const key = crypto.scryptSync(CITATION_ENCRYPTION_SECRET, "twittence-citation-salt", 32);
+  const iv = crypto.randomBytes(12);
+  const cipher = crypto.createCipheriv("aes-256-gcm", key, iv);
+  const ciphertext = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+  return [iv.toString("base64"), authTag.toString("base64"), ciphertext.toString("base64")].join(":");
+}
+
+function decryptSecret(stored) {
+  if (!CITATION_ENCRYPTION_SECRET) throw new Error("CITATION_KEY_ENCRYPTION_SECRET is not configured");
+  const [ivB64, authTagB64, ciphertextB64] = stored.split(":");
+  const key = crypto.scryptSync(CITATION_ENCRYPTION_SECRET, "twittence-citation-salt", 32);
+  const decipher = crypto.createDecipheriv("aes-256-gcm", key, Buffer.from(ivB64, "base64"));
+  decipher.setAuthTag(Buffer.from(authTagB64, "base64"));
+  return Buffer.concat([decipher.update(Buffer.from(ciphertextB64, "base64")), decipher.final()]).toString("utf8");
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -92,13 +124,56 @@ app.use(
 app.use(
   cors({
     origin: allowedOrigins,
-    methods: ["GET", "POST", "OPTIONS"],
+    methods: ["GET", "POST", "DELETE", "OPTIONS"],
     allowedHeaders: ["Content-Type", "Authorization"],
     credentials: true,
   })
 );
 
 app.use(express.static(hostingDir, { extensions: ["html"] }));
+
+// Stripe webhook signature verification needs the exact raw request body, so this route (and only
+// this one) must be registered with express.raw() *before* the global express.json() parser below —
+// once express.json() has consumed and re-serialized the body, signature verification would fail.
+app.post("/api/webhooks/stripe", express.raw({ type: "application/json" }), async (req, res) => {
+  if (!stripe || !STRIPE_WEBHOOK_SECRET) return res.status(503).json({ error: "Billing is not configured" });
+
+  let event;
+  try {
+    event = stripe.webhooks.constructEvent(req.body, req.headers["stripe-signature"], STRIPE_WEBHOOK_SECRET);
+  } catch (err) {
+    console.error("Stripe webhook signature verification failed:", err.message);
+    return res.status(400).json({ error: "Invalid signature" });
+  }
+
+  if (event.type === "checkout.session.completed") {
+    const session = event.data.object;
+    const uid = session.client_reference_id;
+    const credits = Number(session.metadata?.credits || 0);
+    if (uid && credits > 0) {
+      // Idempotency guard: Stripe retries webhook delivery on any non-2xx response or timeout, so the
+      // same "checkout.session.completed" event can arrive more than once. A transaction keyed on the
+      // Stripe event ID ensures credits are only ever granted once per completed checkout, even if
+      // this handler is invoked for the same session multiple times.
+      const eventRef = db.collection("processedStripeEvents").doc(event.id);
+      const userRef = db.collection("users").doc(uid);
+      try {
+        await db.runTransaction(async (tx) => {
+          const eventDoc = await tx.get(eventRef);
+          if (eventDoc.exists) return; // already processed, no-op
+          tx.set(eventRef, { processedAt: admin.firestore.FieldValue.serverTimestamp(), sessionId: session.id });
+          tx.set(userRef, { citationCredits: admin.firestore.FieldValue.increment(credits) }, { merge: true });
+        });
+      } catch (err) {
+        console.error("Failed to credit citation purchase:", err.message);
+        return res.status(500).json({ error: "Failed to process payment" });
+      }
+    }
+  }
+
+  res.status(200).json({ received: true });
+});
+
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 
@@ -1382,6 +1457,193 @@ app.post("/api/site-wide-audit", verifyToken, async (req, res) => {
   } catch (error) {
     console.error("Site-wide audit error:", error);
     res.status(500).json({ error: "Site-wide audit failed: " + error.message });
+  }
+});
+
+// --- Live citation tracking: hybrid BYOK / managed-credits model ---
+// BYOK: the user's own DataForSEO or SerpApi key, encrypted at rest, never returned to the client
+// after saving, never billed by Twittence. Managed: prepaid credits purchased via Stripe, consumed
+// against Twittence's own provider account. Every route here requires a signed-in user (verifyToken)
+// — there is no anonymous access to this feature, since it's either spending the user's own key or
+// their paid balance.
+
+app.get("/api/citation/status", verifyToken, async (req, res) => {
+  try {
+    const doc = await db.collection("users").doc(req.user.uid).get();
+    const data = doc.exists ? doc.data() : {};
+    res.status(200).json({
+      hasByok: Boolean(data.citationApiKey),
+      byokProvider: data.citationApiProvider || null,
+      credits: data.citationCredits || 0,
+      managedAvailable: Boolean(CITATION_PROVIDER_LOGIN && CITATION_PROVIDER_PASSWORD),
+      billingConfigured: Boolean(stripe),
+    });
+  } catch (error) {
+    console.error("Citation status error:", error);
+    res.status(500).json({ error: "Failed to retrieve citation status" });
+  }
+});
+
+app.post("/api/citation/key", verifyToken, async (req, res) => {
+  if (!CITATION_ENCRYPTION_SECRET) {
+    return res.status(503).json({ error: "This deployment has not configured key storage yet. Contact support." });
+  }
+  const { provider, apiKey, apiSecret } = req.body;
+  if (!["dataforseo", "serpapi"].includes(provider)) {
+    return res.status(400).json({ error: "provider must be 'dataforseo' or 'serpapi'" });
+  }
+  if (!apiKey || typeof apiKey !== "string" || apiKey.trim().length < 8) {
+    return res.status(400).json({ error: "A valid apiKey is required" });
+  }
+  if (provider === "dataforseo" && (!apiSecret || typeof apiSecret !== "string")) {
+    return res.status(400).json({ error: "DataForSEO requires both apiKey (login) and apiSecret (password)" });
+  }
+  try {
+    await db.collection("users").doc(req.user.uid).set(
+      {
+        citationApiProvider: provider,
+        citationApiKey: encryptSecret(apiKey.trim()),
+        citationApiSecret: apiSecret ? encryptSecret(apiSecret.trim()) : admin.firestore.FieldValue.delete(),
+      },
+      { merge: true }
+    );
+    res.status(200).json({ saved: true });
+  } catch (error) {
+    console.error("Citation key save error:", error);
+    res.status(500).json({ error: "Failed to save API key" });
+  }
+});
+
+app.delete("/api/citation/key", verifyToken, async (req, res) => {
+  try {
+    await db.collection("users").doc(req.user.uid).update({
+      citationApiProvider: admin.firestore.FieldValue.delete(),
+      citationApiKey: admin.firestore.FieldValue.delete(),
+      citationApiSecret: admin.firestore.FieldValue.delete(),
+    });
+    res.status(200).json({ deleted: true });
+  } catch (error) {
+    console.error("Citation key delete error:", error);
+    res.status(500).json({ error: "Failed to remove API key" });
+  }
+});
+
+app.post("/api/credits/checkout", verifyToken, async (req, res) => {
+  if (!stripe) return res.status(503).json({ error: "Billing is not configured on this deployment yet." });
+  try {
+    const session = await stripe.checkout.sessions.create({
+      mode: "payment",
+      client_reference_id: req.user.uid,
+      customer_email: req.user.email || undefined,
+      line_items: [
+        {
+          price_data: {
+            currency: "usd",
+            unit_amount: Math.round(CREDIT_PACK_PRICE_USD * 100),
+            product_data: { name: `Twittence — ${CREDIT_PACK_SIZE} live citation checks` },
+          },
+          quantity: 1,
+        },
+      ],
+      metadata: { credits: String(CREDIT_PACK_SIZE), uid: req.user.uid },
+      success_url: `${req.headers.origin || "https://twittence.com"}/?citation_purchase=success`,
+      cancel_url: `${req.headers.origin || "https://twittence.com"}/?citation_purchase=cancelled`,
+    });
+    res.status(200).json({ checkoutUrl: session.url });
+  } catch (error) {
+    console.error("Stripe checkout creation error:", error);
+    res.status(500).json({ error: "Failed to start checkout" });
+  }
+});
+
+// Provider adapters — built against each provider's public API documentation. Marked explicitly as
+// unverified: neither has been exercised against a real funded account, since Twittence does not
+// hold one. BYOK users are the first real-world test; errors are surfaced to the user rather than
+// silently swallowed so a broken adapter fails loudly instead of returning fabricated data.
+async function fetchDataForSeoAiOverview(login, password, keyword) {
+  const auth = Buffer.from(`${login}:${password}`).toString("base64");
+  const body = JSON.stringify([{ keyword, language_code: "en", location_code: 2840, load_async_ai_overview: true }]);
+  return new Promise((resolve, reject) => {
+    const req2 = https.request(
+      { hostname: "api.dataforseo.com", path: "/v3/serp/google/organic/live/advanced", method: "POST",
+        headers: { Authorization: `Basic ${auth}`, "Content-Type": "application/json", "Content-Length": Buffer.byteLength(body) } },
+      (res2) => {
+        let data = "";
+        res2.on("data", (c) => (data += c));
+        res2.on("end", () => {
+          try { resolve(JSON.parse(data)); } catch (e) { reject(new Error("DataForSEO returned invalid JSON")); }
+        });
+      }
+    );
+    req2.on("error", reject);
+    req2.write(body);
+    req2.end();
+  });
+}
+
+async function fetchSerpApiAiOverview(apiKey, keyword) {
+  const searchUrl = `https://serpapi.com/search.json?engine=google&q=${encodeURIComponent(keyword)}&api_key=${apiKey}`;
+  const searchResult = await new Promise((resolve, reject) => {
+    https.get(searchUrl, (res2) => {
+      let data = "";
+      res2.on("data", (c) => (data += c));
+      res2.on("end", () => { try { resolve(JSON.parse(data)); } catch (e) { reject(new Error("SerpApi returned invalid JSON")); } });
+    }).on("error", reject);
+  });
+  const pageToken = searchResult.ai_overview?.page_token;
+  if (!pageToken) return { ai_overview: null, note: "No AI Overview present for this query." };
+  // page_token expires ~1 minute after the initial search — fetched immediately, no delay introduced.
+  const overviewUrl = `https://serpapi.com/search.json?engine=google_ai_overview&page_token=${encodeURIComponent(pageToken)}&api_key=${apiKey}`;
+  return new Promise((resolve, reject) => {
+    https.get(overviewUrl, (res2) => {
+      let data = "";
+      res2.on("data", (c) => (data += c));
+      res2.on("end", () => { try { resolve(JSON.parse(data)); } catch (e) { reject(new Error("SerpApi returned invalid JSON")); } });
+    }).on("error", reject);
+  });
+}
+
+app.post("/api/citation-check", verifyToken, async (req, res) => {
+  const { keyword } = req.body;
+  if (!keyword || typeof keyword !== "string" || !keyword.trim()) {
+    return res.status(400).json({ error: "keyword is required" });
+  }
+  const userRef = db.collection("users").doc(req.user.uid);
+  const userDoc = await userRef.get();
+  const userData = userDoc.exists ? userDoc.data() : {};
+
+  try {
+    // Path 1: BYOK — the user's own key, no credit deduction, Twittence never sees the plaintext key
+    // outside this request's memory.
+    if (userData.citationApiKey && userData.citationApiProvider) {
+      const apiKey = decryptSecret(userData.citationApiKey);
+      const provider = userData.citationApiProvider;
+      const result = provider === "dataforseo"
+        ? await fetchDataForSeoAiOverview(apiKey, decryptSecret(userData.citationApiSecret), keyword.trim())
+        : await fetchSerpApiAiOverview(apiKey, keyword.trim());
+      return res.status(200).json({ source: "byok", provider, result });
+    }
+
+    // Path 2: managed credits — deducted atomically so two concurrent requests can't both succeed
+    // against a balance of 1.
+    if (!CITATION_PROVIDER_LOGIN || !CITATION_PROVIDER_PASSWORD) {
+      return res.status(503).json({ error: "No API key on file, and this deployment has no managed provider configured yet." });
+    }
+    const deducted = await db.runTransaction(async (tx) => {
+      const fresh = await tx.get(userRef);
+      const credits = (fresh.exists ? fresh.data().citationCredits : 0) || 0;
+      if (credits < 1) return false;
+      tx.update(userRef, { citationCredits: admin.firestore.FieldValue.increment(-1) });
+      return true;
+    });
+    if (!deducted) {
+      return res.status(402).json({ error: "No citation credits remaining and no personal API key on file.", checkoutRequired: true });
+    }
+    const result = await fetchDataForSeoAiOverview(CITATION_PROVIDER_LOGIN, CITATION_PROVIDER_PASSWORD, keyword.trim());
+    res.status(200).json({ source: "managed", provider: "dataforseo", result });
+  } catch (error) {
+    console.error("Citation check error:", error);
+    res.status(502).json({ error: "Citation lookup failed: " + error.message });
   }
 });
 

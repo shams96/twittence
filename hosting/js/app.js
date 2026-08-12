@@ -29,11 +29,97 @@ onAuthStateChanged(auth, async (user) => {
     userEmail.textContent = user.email;
     userEmail.classList.remove("hidden");
     loadHistory(user.uid);
+    loadCitationStatus();
   } else {
     authBtn.textContent = "Sign In";
     userEmail.classList.add("hidden");
+    document.getElementById("citationPanel").classList.add("hidden");
+    document.getElementById("citationStatus").textContent = "Sign in to check your citation tracking status.";
   }
 });
+
+async function loadCitationStatus() {
+  if (!currentUser) return;
+  const statusEl = document.getElementById("citationStatus");
+  const panel = document.getElementById("citationPanel");
+  try {
+    const token = await currentUser.getIdToken();
+    const res = await fetch(`${API_BASE}/api/citation/status`, { headers: { Authorization: `Bearer ${token}` } });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Could not load citation status");
+    panel.classList.remove("hidden");
+    if (data.hasByok) {
+      statusEl.className = "status status-success";
+      statusEl.textContent = `Using your own ${data.byokProvider} API key — no credits charged.`;
+    } else if (data.credits > 0) {
+      statusEl.className = "status status-success";
+      statusEl.textContent = `${data.credits} citation check credit${data.credits === 1 ? "" : "s"} remaining.`;
+    } else if (!data.managedAvailable && !data.billingConfigured) {
+      statusEl.className = "status status-info";
+      statusEl.textContent = "Live citation tracking isn't fully set up on this deployment yet — bring your own API key below to use it now.";
+    } else {
+      statusEl.className = "status status-info";
+      statusEl.textContent = "No API key or credits on file. Add your own key (free) or buy credits below.";
+    }
+  } catch (err) {
+    statusEl.className = "status status-error";
+    statusEl.textContent = "Citation status: " + err.message;
+  }
+}
+
+window.saveCitationKey = async () => {
+  if (!currentUser) return showToast("Sign in first", "error");
+  const provider = document.getElementById("citationProvider").value;
+  const apiKey = document.getElementById("citationApiKey").value.trim();
+  const apiSecret = document.getElementById("citationApiSecret").value.trim();
+  if (!apiKey) return showToast("Enter an API key first", "error");
+  try {
+    const token = await currentUser.getIdToken();
+    const res = await fetch(`${API_BASE}/api/citation/key`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ provider, apiKey, apiSecret: apiSecret || undefined }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Failed to save key");
+    document.getElementById("citationApiKey").value = "";
+    document.getElementById("citationApiSecret").value = "";
+    showToast("API key saved", "success");
+    loadCitationStatus();
+  } catch (err) {
+    showToast("Save failed: " + err.message, "error");
+  }
+};
+
+window.removeCitationKey = async () => {
+  if (!currentUser) return;
+  try {
+    const token = await currentUser.getIdToken();
+    const res = await fetch(`${API_BASE}/api/citation/key`, { method: "DELETE", headers: { Authorization: `Bearer ${token}` } });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Failed to remove key");
+    showToast("API key removed", "success");
+    loadCitationStatus();
+  } catch (err) {
+    showToast("Remove failed: " + err.message, "error");
+  }
+};
+
+window.buyCitationCredits = async () => {
+  if (!currentUser) return showToast("Sign in first", "error");
+  try {
+    const token = await currentUser.getIdToken();
+    const res = await fetch(`${API_BASE}/api/credits/checkout`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Checkout is not available yet");
+    window.location.href = data.checkoutUrl;
+  } catch (err) {
+    showToast("Checkout failed: " + err.message, "error");
+  }
+};
 
 window.handleAuth = async () => {
   const btn = document.getElementById("authBtn");
@@ -281,6 +367,15 @@ document.addEventListener("DOMContentLoaded", () => {
   const topicSelect = document.getElementById("topic");
   if (topicSelect) {
     topicSelect.addEventListener("change", () => reorderVerticalOptions(topicSelect.value));
+  }
+  const providerSelect = document.getElementById("citationProvider");
+  const secretGroup = document.getElementById("citationSecretGroup");
+  if (providerSelect && secretGroup) {
+    const syncSecretVisibility = () => {
+      secretGroup.style.display = providerSelect.value === "dataforseo" ? "" : "none";
+    };
+    providerSelect.addEventListener("change", syncSecretVisibility);
+    syncSecretVisibility();
   }
 });
 

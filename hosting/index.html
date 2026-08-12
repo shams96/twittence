@@ -149,6 +149,25 @@
   <div id="results" class="hidden"></div>
 </div></section>
 
+<section><div class="container"><div class="card"><h2>Live Citation Tracking <span class="badge" style="margin-left:.5rem">Optional</span></h2>
+  <p style="margin-bottom:1rem;color:var(--text-dim);font-size:.9rem">Check whether a page is actually being cited in Google AI Overviews / ChatGPT search results right now. Requires either your own SERP API key (free, no markup) or prepaid credits.</p>
+  <div id="citationStatus" class="status status-info" style="margin-bottom:1rem">Sign in to check your citation tracking status.</div>
+  <div id="citationPanel" class="hidden">
+    <div class="form-grid">
+      <div class="form-group"><label for="citationProvider">Provider (bring your own key)</label>
+        <select id="citationProvider"><option value="dataforseo">DataForSEO</option><option value="serpapi">SerpApi</option></select>
+      </div>
+      <div class="form-group"><label for="citationApiKey">API Key (login, for DataForSEO)</label><input type="password" id="citationApiKey" placeholder="Your API key"></div>
+      <div class="form-group" id="citationSecretGroup"><label for="citationApiSecret">API Secret (password, DataForSEO only)</label><input type="password" id="citationApiSecret" placeholder="Required for DataForSEO"></div>
+    </div>
+    <div style="display:flex;gap:.6rem;flex-wrap:wrap;margin-top:.5rem">
+      <button class="btn-ghost-sm" onclick="saveCitationKey()">Save my API key</button>
+      <button class="btn-ghost-sm" onclick="removeCitationKey()">Remove saved key</button>
+      <button class="btn-action" style="width:auto;padding:0.6rem 1.2rem" onclick="buyCitationCredits()">Buy credits</button>
+    </div>
+  </div>
+</div></div></section>
+
 <section><div class="container"><div class="card"><h2>Audit History</h2><div id="historyList" class="history-list"></div><div id="noHistory" class="history-empty"><div class="he-icon">&#128203;</div>No audits yet. Sign in and run your first audit above.</div></div></div></section>
 
 <footer><div class="container"><p>&copy; 2026 Twittence. Self-Healing SEO / AEO / GEO &amp; Sentiment Engine. Built on Firebase &amp; Claude AI. <a href="/privacy">Privacy Policy</a> · <a href="/terms">Terms of Service</a></p></div></footer>
