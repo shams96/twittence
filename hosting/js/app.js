@@ -20,25 +20,28 @@ const auth = getAuth(app);
 const db = getFirestore(app);
 let currentUser = null;
 
-// BYOK (bring-your-own citation API key) lives ONLY here — sessionStorage, never sent to our server
-// for storage, never written to a database. The browser itself wipes sessionStorage when the tab or
-// window closes, which is what makes "removed once the session is over" an actual guarantee rather
-// than a promise our code has to keep on every path. It's also explicitly cleared on sign-out below,
-// as a second, deliberate guarantee independent of tab lifetime (shared/public computer scenario).
+// BYOK (bring-your-own citation API key) lives ONLY here — localStorage, never sent to our server
+// for storage, never written to a database. Deliberately localStorage rather than sessionStorage: the
+// guarantee that matters to a user is "gone once I sign out," not "gone the instant I close a tab" —
+// the latter is more restrictive than useful and just forces re-entering the key on every reload.
+// localStorage survives reloads/tab closes on this device; explicit sign-out (below) is what actually
+// clears it, matching how password managers and every "we store your API key only in your browser"
+// tool handle this. Scope of the guarantee: this device/browser, only while signed in — never our
+// servers, at any point.
 const BYOK_STORAGE_KEY = "twittence_byok";
 function getByok() {
   try {
-    const raw = sessionStorage.getItem(BYOK_STORAGE_KEY);
+    const raw = localStorage.getItem(BYOK_STORAGE_KEY);
     return raw ? JSON.parse(raw) : null;
   } catch (_) {
     return null;
   }
 }
 function setByok(provider, apiKey, apiSecret) {
-  sessionStorage.setItem(BYOK_STORAGE_KEY, JSON.stringify({ provider, apiKey, apiSecret: apiSecret || null }));
+  localStorage.setItem(BYOK_STORAGE_KEY, JSON.stringify({ provider, apiKey, apiSecret: apiSecret || null }));
 }
 function clearByok() {
-  sessionStorage.removeItem(BYOK_STORAGE_KEY);
+  localStorage.removeItem(BYOK_STORAGE_KEY);
 }
 
 onAuthStateChanged(auth, async (user) => {
@@ -73,7 +76,7 @@ async function loadCitationStatus() {
     panel.classList.remove("hidden");
     if (byok) {
       statusEl.className = "status status-success";
-      statusEl.textContent = `Using your own ${byok.provider} API key for this session — no credits charged, key never sent to our servers for storage.`;
+      statusEl.textContent = `Using your own ${byok.provider} API key, saved in this browser — no credits charged, key never sent to our servers for storage. Cleared automatically when you sign out.`;
     } else if (data.credits > 0) {
       statusEl.className = "status status-success";
       statusEl.textContent = `${data.credits} citation check credit${data.credits === 1 ? "" : "s"} remaining.`;
@@ -82,7 +85,7 @@ async function loadCitationStatus() {
       statusEl.textContent = "Live citation tracking isn't fully set up on this deployment yet — bring your own API key below to use it now.";
     } else {
       statusEl.className = "status status-info";
-      statusEl.textContent = "No API key set for this session and no credits on file. Add your own key (free) or buy credits below.";
+      statusEl.textContent = "No API key saved and no credits on file. Add your own key (free) or buy credits below.";
     }
   } catch (err) {
     statusEl.className = "status status-error";
@@ -90,8 +93,8 @@ async function loadCitationStatus() {
   }
 }
 
-// The key never leaves the browser for storage purposes — it's held only in sessionStorage, which
-// the browser itself clears when the tab/window closes. Nothing is sent to our server here at all;
+// The key never leaves the browser for storage purposes — it's held only in localStorage, cleared
+// explicitly on sign-out (see onAuthStateChanged above). Nothing is sent to our server here at all;
 // "saving" is a purely local, client-side action. It's only ever transmitted later, per citation
 // check request, for one-time in-memory use (see runCitationCheck / the server's /api/citation-check).
 window.saveCitationKey = () => {
@@ -104,7 +107,7 @@ window.saveCitationKey = () => {
   setByok(provider, apiKey, apiSecret || null);
   document.getElementById("citationApiKey").value = "";
   document.getElementById("citationApiSecret").value = "";
-  showToast("API key set for this session (not stored on our servers)", "success");
+  showToast("API key saved in this browser (not stored on our servers)", "success");
   loadCitationStatus();
 };
 

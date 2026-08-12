@@ -154,7 +154,7 @@
 
 <section><div class="container"><div class="card"><h2>Live Citation Tracking <span class="badge" style="margin-left:.5rem">Optional</span></h2>
   <p style="margin-bottom:1rem;color:var(--text-dim);font-size:.9rem">Check whether a page is actually being cited in Google AI Overviews / ChatGPT search results right now. Requires either your own SERP API key (free, no markup) or prepaid credits.</p>
-  <p style="margin-bottom:1rem;color:var(--text-dim);font-size:.8rem"><strong>Your key never touches our servers for storage.</strong> It's held only in this browser tab's session — cleared automatically when you close the tab or sign out — and sent per-request for one-time use only. We never write it to a database.</p>
+  <p style="margin-bottom:1rem;color:var(--text-dim);font-size:.8rem"><strong>Your key never touches our servers for storage.</strong> It's saved only in this browser, sent per-request for one-time use only, and cleared automatically the moment you sign out. We never write it to a database.</p>
   <div id="citationStatus" class="status status-info" style="margin-bottom:1rem">Sign in to check your citation tracking status.</div>
   <div id="citationPanel" class="hidden">
     <div class="form-grid">
@@ -164,6 +164,7 @@
       <div class="form-group"><label for="citationApiKey">API Key (login, for DataForSEO)</label><input type="password" id="citationApiKey" placeholder="Your API key"></div>
       <div class="form-group" id="citationSecretGroup"><label for="citationApiSecret">API Secret (password, DataForSEO only)</label><input type="password" id="citationApiSecret" placeholder="Required for DataForSEO"></div>
     </div>
+    <p style="margin:.4rem 0 0;color:var(--text-dim);font-size:.75rem">Saved to this browser only — never sent to our servers to store. Stays saved across reloads while you're signed in; <strong>cleared automatically the moment you sign out</strong> (not just when you close the tab).</p>
     <div style="display:flex;gap:.6rem;flex-wrap:wrap;margin-top:.5rem">
       <button class="btn-ghost-sm" onclick="saveCitationKey()">Save my API key</button>
       <button class="btn-ghost-sm" onclick="removeCitationKey()">Remove saved key</button>
