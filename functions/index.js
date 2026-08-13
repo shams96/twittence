@@ -639,6 +639,111 @@ function analyzeAuthoritativeCitations($, bodyText) {
   return { externalCitationLinks, hasExpertOrClinicalLanguage };
 }
 
+// GEO gate signal: whether the real AI crawlers (not Twittence's own fetcher, which is unaffected
+// either way) are actually allowed to reach this content at all. This sits upstream of every other
+// GEO signal — a page can be perfectly structured for citation and still be invisible to AI systems
+// if its own robots.txt blocks GPTBot/ClaudeBot/PerplexityBot. There is no bypass for a blocked
+// crawler to recommend: OpenAI, Anthropic, and Perplexity all publicly commit to honoring robots.txt,
+// so the only real fix is the site owner editing their own file — which is exactly what this surfaces.
+const TIER1_CRAWLERS = ["GPTBot", "OAI-SearchBot", "ChatGPT-User", "ClaudeBot", "PerplexityBot"];
+
+function fetchRobotsTxt(pageUrl) {
+  return new Promise((resolve) => {
+    let origin;
+    try {
+      origin = new URL(pageUrl).origin;
+    } catch (_) {
+      return resolve(null);
+    }
+    https.get(`${origin}/robots.txt`, { headers: { "User-Agent": "TwittenceBot/1.0" }, timeout: 8000 }, (res) => {
+      if (res.statusCode !== 200) { res.resume(); return resolve(null); }
+      let data = "";
+      res.on("data", (c) => (data += c));
+      res.on("end", () => resolve(data));
+    }).on("error", () => resolve(null)).on("timeout", function () { this.destroy(); resolve(null); });
+  });
+}
+
+// Parses a robots.txt into per-user-agent Disallow rules, then checks each Tier-1 AI crawler against
+// both its own named block and the wildcard (User-agent: *) block, since a crawler with no specific
+// section still inherits the wildcard rules.
+function analyzeCrawlerAccess(robotsTxt) {
+  if (robotsTxt === null) {
+    // No robots.txt at all is the standard "everything allowed" default — not an error, not a block.
+    return { robotsTxtFound: false, blockedCrawlers: [], allowedCrawlers: TIER1_CRAWLERS, crawlerAccessScore: 20 };
+  }
+  const blocks = {};
+  let currentAgents = [];
+  robotsTxt.split(/\r?\n/).forEach((line) => {
+    const trimmed = line.split("#")[0].trim();
+    if (!trimmed) return;
+    const uaMatch = trimmed.match(/^user-agent:\s*(.+)$/i);
+    if (uaMatch) {
+      currentAgents = [uaMatch[1].trim()];
+      if (!blocks[currentAgents[0]]) blocks[currentAgents[0]] = [];
+      return;
+    }
+    const disallowMatch = trimmed.match(/^disallow:\s*(.*)$/i);
+    if (disallowMatch && currentAgents.length) {
+      currentAgents.forEach((agent) => blocks[agent].push(disallowMatch[1].trim()));
+    }
+  });
+  const isFullyBlocked = (rules) => rules.some((r) => r === "/");
+  const wildcardBlocked = blocks["*"] ? isFullyBlocked(blocks["*"]) : false;
+
+  const blockedCrawlers = [];
+  const allowedCrawlers = [];
+  TIER1_CRAWLERS.forEach((bot) => {
+    const botKey = Object.keys(blocks).find((k) => k.toLowerCase() === bot.toLowerCase());
+    const explicitlyBlocked = botKey ? isFullyBlocked(blocks[botKey]) : false;
+    const blocked = explicitlyBlocked || (!botKey && wildcardBlocked);
+    (blocked ? blockedCrawlers : allowedCrawlers).push(bot);
+  });
+
+  // 20 pts total: -4 per blocked Tier-1 crawler (5 crawlers x 4 = 20 max deduction), floored at 0.
+  const crawlerAccessScore = Math.max(0, 20 - blockedCrawlers.length * 4);
+  return { robotsTxtFound: true, blockedCrawlers, allowedCrawlers, crawlerAccessScore };
+}
+
+// GEO entity signal: does this brand exist in the knowledge graph AI systems actually draw entity
+// facts from? Real API calls, not a search-instruction placeholder — Wikipedia's and Wikidata's
+// search APIs are free and require no auth. A heuristic brand name is derived from the domain itself
+// (no extra form field required) since most audits won't have a separate "brand name" input.
+function deriveBrandNameFromUrl(pageUrl) {
+  try {
+    const hostname = new URL(pageUrl).hostname.replace(/^www\./, "");
+    const base = hostname.split(".")[0];
+    return base.charAt(0).toUpperCase() + base.slice(1);
+  } catch (_) {
+    return null;
+  }
+}
+
+function fetchJson(hostname, path) {
+  return new Promise((resolve) => {
+    https.get({ hostname, path, headers: { "User-Agent": "TwittenceBot/1.0" }, timeout: 6000 }, (res) => {
+      let data = "";
+      res.on("data", (c) => (data += c));
+      res.on("end", () => {
+        try { resolve(JSON.parse(data)); } catch (_) { resolve(null); }
+      });
+    }).on("error", () => resolve(null)).on("timeout", function () { this.destroy(); resolve(null); });
+  });
+}
+
+async function fetchWikipediaPresence(brandName) {
+  if (!brandName) return { hasWikipediaPage: false, hasWikidataEntry: false, brandNameChecked: null };
+  const encoded = encodeURIComponent(brandName);
+  const [wpResult, wdResult] = await Promise.all([
+    fetchJson("en.wikipedia.org", `/w/api.php?action=query&list=search&srsearch=${encoded}&format=json`),
+    fetchJson("www.wikidata.org", `/w/api.php?action=wbsearchentities&search=${encoded}&language=en&format=json`),
+  ]);
+  const topWpTitle = wpResult?.query?.search?.[0]?.title?.toLowerCase() || "";
+  const hasWikipediaPage = topWpTitle.includes(brandName.toLowerCase());
+  const hasWikidataEntry = Boolean(wdResult?.search?.length);
+  return { hasWikipediaPage, hasWikidataEntry, brandNameChecked: brandName };
+}
+
 function detectSchemaTypes($) {
   const types = new Set();
   $("script[type='application/ld+json']").each((_, el) => {
@@ -658,7 +763,7 @@ function detectSchemaTypes($) {
 // extractability (does the page lead with an answer, are headings phrased as real questions, are
 // FAQ answers sized for lifting into a response) and authority/freshness signals are what the
 // research ties to actual citation likelihood.
-function analyzeGeo($, html, url, topic) {
+function analyzeGeo($, html, url, topic, crawlerAccess, wikipediaPresence) {
   const authority = detectAuthorityAndFreshness($);
   const headingQ = analyzeHeadingQuestions($);
   const faqQuality = analyzeFaqQuality($);
@@ -714,32 +819,48 @@ function analyzeGeo($, html, url, topic) {
     hasGoodListDensity: scannability.hasGoodListDensity,
     externalCitationLinks: citations.externalCitationLinks,
     hasExpertOrClinicalLanguage: citations.hasExpertOrClinicalLanguage,
+    robotsTxtFound: crawlerAccess?.robotsTxtFound ?? null,
+    blockedAiCrawlers: crawlerAccess?.blockedCrawlers ?? [],
+    allowedAiCrawlers: crawlerAccess?.allowedCrawlers ?? [],
+    hasWikipediaPage: wikipediaPresence?.hasWikipediaPage ?? false,
+    hasWikidataEntry: wikipediaPresence?.hasWikidataEntry ?? false,
+    brandNameChecked: wikipediaPresence?.brandNameChecked ?? null,
   };
 
-  // Six-dimension rebalance (100 pts total) covering the full GEO Layer-1 rubric: Direct Answer &
-  // Structure, Information Gain, Schema Clarity, Authoritative Citations, Scannability, Freshness —
-  // FAQ/schema/heading signals folded in rather than scored standalone to avoid double-counting.
+  // Seven-dimension rebalance (100 pts total) covering the full GEO Layer-1 rubric plus the crawler
+  // access gate: Direct Answer & Structure, Information Gain, Schema Clarity, Authority & Citations
+  // (now includes Wikipedia/Wikidata entity presence), Scannability, Freshness, AI Crawler Access.
+  // FAQ/schema/heading signals folded in rather than scored standalone to avoid double-counting — a
+  // prior version of this function also double-counted hasAuthor/authorHasExternalLink across two
+  // buckets; fixed here as part of this rebalance, not carried forward.
   let geoScore = 0;
-  // A) Direct Answer & Structure — 20
-  geoScore += checks.hasEarlyDirectAnswer ? 12 : 0;
-  geoScore += Math.min(8, Math.round(checks.questionHeadingRatio * 0.08));
-  // B) Information Gain / Original Data — 15
-  geoScore += checks.hasOriginalDataLanguage ? 10 : 0;
-  geoScore += Math.min(5, checks.statDensity);
-  // C) Schema & Structural Clarity — 15
-  geoScore += (checks.hasFAQSchema ? 6 : 0) + (checks.hasHowToSchema ? 4 : 0) + (checks.hasArticleSchema ? 3 : 0);
+  // A) Direct Answer & Structure — 16
+  geoScore += checks.hasEarlyDirectAnswer ? 10 : 0;
+  geoScore += Math.min(6, Math.round(checks.questionHeadingRatio * 0.06));
+  // B) Information Gain / Original Data — 12
+  geoScore += checks.hasOriginalDataLanguage ? 8 : 0;
+  geoScore += Math.min(4, checks.statDensity);
+  // C) Schema & Structural Clarity — 12
+  geoScore += (checks.hasFAQSchema ? 5 : 0) + (checks.hasHowToSchema ? 3 : 0) + (checks.hasArticleSchema ? 2 : 0);
   geoScore += checks.hasFAQSchema ? Math.round((checks.faqWellSizedAnswers / Math.max(checks.faqQuestionCount, 1)) * 2) : 0;
-  // D) Authoritative Entities & Citations — 20
-  geoScore += (checks.hasAuthor ? 5 : 0) + (checks.authorHasExternalLink ? 3 : 0);
-  geoScore += Math.min(7, checks.externalCitationLinks * 2);
-  geoScore += checks.hasExpertOrClinicalLanguage ? 5 : 0;
-  // E) Scannability & Formatting — 15
-  geoScore += checks.hasTable ? 6 : 0;
-  geoScore += checks.hasGoodListDensity ? 6 : 0;
-  geoScore += wordCount > 300 ? 3 : 0;
-  // F) Freshness — 15
-  geoScore += (checks.hasDatePublished ? 7 : 0) + (checks.isRecentlyUpdated ? 8 : 0);
-  geoScore += (checks.hasAuthor ? 6 : 0) + (checks.authorHasExternalLink ? 4 : 0);
+  // D) Authority, Citations & Entity Presence — 16 (Wikipedia/Wikidata are a real, free, automated
+  // check for whether this brand exists in the knowledge graph AI systems draw entity facts from —
+  // distinct from on-page citation links, which only show the page cites others, not that the page's
+  // own subject is independently verifiable).
+  geoScore += (checks.hasAuthor ? 3 : 0) + (checks.authorHasExternalLink ? 2 : 0);
+  geoScore += Math.min(4, checks.externalCitationLinks * 2);
+  geoScore += checks.hasExpertOrClinicalLanguage ? 3 : 0;
+  geoScore += checks.hasWikipediaPage ? 2 : 0;
+  geoScore += checks.hasWikidataEntry ? 2 : 0;
+  // E) Scannability & Formatting — 12
+  geoScore += checks.hasTable ? 5 : 0;
+  geoScore += checks.hasGoodListDensity ? 5 : 0;
+  geoScore += wordCount > 300 ? 2 : 0;
+  // F) Freshness — 12
+  geoScore += (checks.hasDatePublished ? 6 : 0) + (checks.isRecentlyUpdated ? 6 : 0);
+  // G) AI Crawler Access — 20 (see analyzeCrawlerAccess: no robots.txt = full 20, since absence is
+  // the standard "everything allowed" default, not a penalty).
+  geoScore += crawlerAccess?.crawlerAccessScore ?? 20;
   checks.geoScore = Math.min(100, geoScore);
   return checks;
 }
@@ -1022,14 +1143,18 @@ app.post("/api/run-audit", verifyToken, async (req, res) => {
     });
 
     const seoRelevant = ["all", "technical", "seo"].includes(trimmedVertical);
-    const [fetchOutcome, externalBenchmark] = await Promise.all([
+    const geoRelevant = ["all", "geo"].includes(trimmedVertical);
+    const [fetchOutcome, externalBenchmark, robotsTxt] = await Promise.all([
       fetchHtmlWithFallback(trimmedUrl).catch((fetchError) => {
         console.error("Page fetch failed:", fetchError.message);
         return null;
       }),
       seoRelevant ? fetchPageSpeedInsights(trimmedUrl) : Promise.resolve(null),
+      geoRelevant ? fetchRobotsTxt(trimmedUrl) : Promise.resolve(null),
     ]);
     const html = fetchOutcome?.html || null;
+    const crawlerAccess = geoRelevant ? analyzeCrawlerAccess(robotsTxt) : null;
+    const wikipediaPresence = geoRelevant ? await fetchWikipediaPresence(deriveBrandNameFromUrl(trimmedUrl)) : null;
 
     let seoAnalysis = null, aeoAnalysis = null, geoAnalysis = null, sentimentAnalysis = null, contentAnalysis = null, localAnalysis = null;
     let $ = null;
@@ -1039,7 +1164,7 @@ app.post("/api/run-audit", verifyToken, async (req, res) => {
       $ = cheerio.load(html, { decodeEntities: false });
       seoAnalysis = analyzeSeo($, html);
       aeoAnalysis = analyzeAeo($, html);
-      geoAnalysis = analyzeGeo($, html, trimmedUrl, trimmedTopic);
+      geoAnalysis = analyzeGeo($, html, trimmedUrl, trimmedTopic, crawlerAccess, wikipediaPresence);
       sentimentAnalysis = analyzeSentiment(html);
       contentAnalysis = analyzeContent($, html);
       localAnalysis = analyzeLocal($, html);
@@ -1072,6 +1197,8 @@ Ground your reasoning in how AI search actually works, not outdated keyword-rank
 - Citation displacement framing: you do not have live data on what Google AI Overviews, ChatGPT, or Perplexity are currently citing for this topic (that requires a paid SERP data feed this tool doesn't have) — never claim to know current citation status or name a specific competitor as "the current winner." Instead, reason from the evidence about what a generic AI-citable source in this space would need (a direct answer, named data, expert/clinical attribution, extractable structure) and frame recommendations as closing that gap, not as displacing a named source you haven't actually observed.
 - When the evidence shows expert/clinical language, external citation links, or original-data signals already present, treat that as a real strength to call out by name in findings — don't undersell genuine authority signals just because the score isn't 100.
 - Structure the selfHealingPlan phases to mirror the AI-answer format proven to get extracted: a phase for tightening the direct-answer opening, a phase for adding scannable structure (tables/lists) if missing, a phase for authority/citation signals if missing, and a phase for FAQ/schema if missing — skip any phase the evidence shows is already strong.
+- If the evidence shows blockedAiCrawlers is non-empty, that is the single highest-priority finding, full stop — make it the first finding and the first selfHealingPlan phase, and say explicitly that no other GEO work matters until robots.txt is fixed, since a blocked crawler (GPTBot/ClaudeBot/PerplexityBot/etc.) cannot see any of the page's content regardless of how well it's structured. There is no bypass to suggest — the only real fix is the site owner editing their own robots.txt to allow the named bots; say that plainly rather than implying anything else is possible.
+- hasWikipediaPage / hasWikidataEntry reflect whether this brand exists in the public knowledge graph AI systems draw entity facts from (checked via the real Wikipedia/Wikidata search APIs, not inferred) — if both are false, note this as a real, addressable gap (most businesses legitimately won't have one yet — frame it as an opportunity, not a defect) rather than ignoring it.
 
 Never invent a score that contradicts the supplied analysis, and never invent a score for something the evidence doesn't cover. Respond with ONLY valid JSON, no markdown fences, no commentary, matching this shape:
 {"summary": string, "findings": string[], "recommendations": string[], "selfHealingPlan": [{"phase": string, "description": string}]}`;
@@ -1456,6 +1583,14 @@ app.post("/api/site-wide-audit", verifyToken, async (req, res) => {
       if (urlMatches) { for (const m of urlMatches) { const m2 = m.replace(/<[^>]+>/g, "").trim(); if (m2 && m2.startsWith("http") && discovered.length < 50) discovered.push(m2); } }
     } catch (_) { /* sitemap not available */ }
     if (discovered.length === 0) discovered.push(trimmedUrl);
+    // robots.txt and brand knowledge-graph presence are domain-level, not page-level — fetched once
+    // for the whole site-wide run rather than once per discovered page (up to 50), which would be
+    // redundant work against the same file/entity every time.
+    const [siteRobotsTxt, siteWikipediaPresence] = await Promise.all([
+      fetchRobotsTxt(trimmedUrl),
+      fetchWikipediaPresence(deriveBrandNameFromUrl(trimmedUrl)),
+    ]);
+    const siteCrawlerAccess = analyzeCrawlerAccess(siteRobotsTxt);
     const results = [];
     for (const pageUrl of discovered) {
       try {
@@ -1463,7 +1598,7 @@ app.post("/api/site-wide-audit", verifyToken, async (req, res) => {
         const $ = cheerio.load(fetchResult.html, { decodeEntities: false });
         const seoChecks = analyzeSeo($, fetchResult.html);
         const aeoChecks = analyzeAeo($, fetchResult.html);
-        const geoChecks = analyzeGeo($, fetchResult.html, pageUrl, trimmedTopic);
+        const geoChecks = analyzeGeo($, fetchResult.html, pageUrl, trimmedTopic, siteCrawlerAccess, siteWikipediaPresence);
         const sentimentChecks = analyzeSentiment(fetchResult.html);
         const message = await anthropic.messages.create({ model: "claude-sonnet-5", max_tokens: 2048, system: "You are an expert audit analyst. The pillar scores below are already computed from a real crawl — treat them as ground truth, do not re-estimate them. Explain what they mean and give a consolidated recommendation. Respond with ONLY valid JSON, no markdown fences: {\"summary\": string, \"findings\": string[], \"recommendations\": string[]}", messages: [{ role: "user", content: `Page: ${pageUrl}\nSEO score: ${seoChecks.seoScore}, AEO score: ${aeoChecks.aeoScore}, GEO score: ${geoChecks.geoScore}, Sentiment score: ${sentimentChecks.sentimentScore}.` }] });
         const textBlock = message.content.find((b) => b.type === "text");
