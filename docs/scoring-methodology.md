@@ -18,7 +18,7 @@ it's instructed to treat these scores as ground truth, never to re-estimate them
 | Title length | 12 | 30–60 characters |
 | Meta description | 10 | 50–160 characters (2 pts if simply absent, to distinguish "missing" from "present but wrong length") |
 | Has exactly one H1 | 8 (H1 presence) + 12 (single-H1 structure) | |
-| Canonical tag | 6 | present |
+| Canonical tag | 6 (full) / ~1.8 (partial) | Full credit if a canonical tag exists and points to the page itself (or self-pointing can't be evaluated). Partial credit if it exists but points elsewhere — that's a real, verified failure mode (found live on chiarel.com/shop, whose canonical pointed at the homepage), not just "no canonical." Comparison normalizes scheme/`www.`/trailing-slash/query differences. |
 | Open Graph tags | 4 | any `og:*` meta tag present |
 | Structured data | 6 | any JSON-LD block present |
 | Internal links | 8 | more than 3 |

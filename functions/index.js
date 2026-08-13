@@ -417,12 +417,27 @@ function fetchPageSpeedInsights(url) {
   });
 }
 
-function analyzeSeo($, html) {
+// Canonical URLs are compared with scheme/www/trailing-slash/query normalized away, since those
+// differences are cosmetic. Anything else pointing to a different page (e.g. every page pointing at
+// the homepage) is a real bug — it tells Google "don't index this page," which suppresses that page
+// from search entirely. Confirmed live: chiarel.com/shop's canonical points to chiarel.com root.
+function normalizeUrlForCanonicalCompare(u) {
+  try {
+    const parsed = new URL(u);
+    let path = parsed.pathname.replace(/\/+$/, "") || "/";
+    return `${parsed.hostname.replace(/^www\./, "")}${path}`;
+  } catch (_) {
+    return null;
+  }
+}
+
+function analyzeSeo($, html, pageUrl) {
   const checks = {
     titleLength: null,
     metaDescription: null,
     hasH1: false,
     hasCanonical: false,
+    canonicalPointsToSelf: null,
     hasOGTags: false,
     hasStructuredData: false,
     headingStructure: [],
@@ -440,7 +455,18 @@ function analyzeSeo($, html) {
   checks.metaDescription = metaDesc ? metaDesc.length : 0;
 
   checks.hasH1 = $("h1").length > 0;
-  checks.hasCanonical = $("link[rel='canonical']").length > 0;
+  const canonicalHref = $("link[rel='canonical']").first().attr("href");
+  checks.hasCanonical = !!canonicalHref;
+  if (canonicalHref && pageUrl) {
+    try {
+      const resolvedCanonical = new URL(canonicalHref, pageUrl).toString();
+      const normCanonical = normalizeUrlForCanonicalCompare(resolvedCanonical);
+      const normPage = normalizeUrlForCanonicalCompare(pageUrl);
+      checks.canonicalPointsToSelf = normCanonical !== null && normCanonical === normPage;
+    } catch (_) {
+      checks.canonicalPointsToSelf = false;
+    }
+  }
   checks.hasOGTags = $('meta[property^="og:"]').length > 0;
   checks.hasStructuredData = $("script[type='application/ld+json']").length > 0;
 
@@ -480,7 +506,11 @@ function analyzeSeo($, html) {
   if (checks.metaDescription === 0) seoScore += 2;
 
   if (checks.hasH1) seoScore += weights.hasH1;
-  if (checks.hasCanonical) seoScore += weights.hasCanonical;
+  // Full credit for a canonical that exists and points to the page itself (or when self-pointing
+  // can't be checked, e.g. no pageUrl passed in). A canonical pointing elsewhere gets partial credit —
+  // it's not "no canonical," but it's actively telling search engines to skip this page.
+  if (checks.hasCanonical && checks.canonicalPointsToSelf !== false) seoScore += weights.hasCanonical;
+  else if (checks.hasCanonical) seoScore += Math.round(weights.hasCanonical * 0.3);
   if (checks.hasOGTags) seoScore += weights.hasOGTags;
   if (checks.hasStructuredData) seoScore += weights.hasStructuredData;
 
@@ -1235,7 +1265,7 @@ app.post("/api/run-audit", verifyToken, async (req, res) => {
 
     if (html) {
       $ = cheerio.load(html, { decodeEntities: false });
-      seoAnalysis = analyzeSeo($, html);
+      seoAnalysis = analyzeSeo($, html, trimmedUrl);
       aeoAnalysis = analyzeAeo($, html);
       const pricingTransparency = geoRelevant ? analyzePricingTransparency($("body").text() || "") : null;
       geoAnalysis = analyzeGeo($, html, trimmedUrl, trimmedTopic, crawlerAccess, wikipediaPresence, llmsTxtResult, pricingTransparency);
@@ -1274,6 +1304,7 @@ Ground your reasoning in how AI search actually works, not outdated keyword-rank
 - If the evidence shows blockedAiCrawlers is non-empty, that is the single highest-priority finding, full stop — make it the first finding and the first selfHealingPlan phase, and say explicitly that no other GEO work matters until robots.txt is fixed, since a blocked crawler (GPTBot/ClaudeBot/PerplexityBot/etc.) cannot see any of the page's content regardless of how well it's structured. There is no bypass to suggest — the only real fix is the site owner editing their own robots.txt to allow the named bots; say that plainly rather than implying anything else is possible.
 - hasWikipediaPage / hasWikidataEntry reflect whether this brand exists in the public knowledge graph AI systems draw entity facts from (checked via the real Wikipedia/Wikidata search APIs, not inferred) — if both are false, note this as a real, addressable gap (most businesses legitimately won't have one yet — frame it as an opportunity, not a defect) rather than ignoring it.
 - llmsTxtStatus tells you whether /llms.txt exists and is well-formed — "absent" means never created; "misconfigured (returns HTML, not a real file)" is a distinct and worse problem (usually a catch-all route serving the homepage instead of a real static file — flag this specifically, since it looks like it works but doesn't); "present but wrong format" means the wrong syntax was used (e.g. robots.txt directives instead of Markdown); only "present and valid" is a real pass.
+- If hasCanonical is true but canonicalPointsToSelf is false, this page's canonical tag points to a different URL than the page itself (e.g. every page pointing at the homepage) — this actively tells search engines "don't index this page, index that other one instead," which can suppress the page from search results entirely regardless of how good its content is. Treat this as a high-priority technical finding, not a minor detail, and name it specifically (do not just say "canonical tag present" — say what it incorrectly points to if that's evident from context).
 - If pricingIntentDetected is true and hasVisiblePriceFigures is false, this page discusses plans/pricing/subscriptions by name but contains zero actual dollar/currency figures in the raw HTML an AI crawler would see — the numbers are very likely being injected by a separate client-side call after page load. Call this out specifically and by name (an AI system asked "how much does this cost" cannot answer it from this page), and do NOT describe this as "the whole page requires JavaScript" — the evidence only supports the price figures specifically being client-side-only, not the entire page.
 
 Never invent a score that contradicts the supplied analysis, and never invent a score for something the evidence doesn't cover. Respond with ONLY valid JSON, no markdown fences, no commentary, matching this shape:
@@ -1674,7 +1705,7 @@ app.post("/api/site-wide-audit", verifyToken, async (req, res) => {
       try {
         const fetchResult = await fetchHtmlWithFallback(pageUrl);
         const $ = cheerio.load(fetchResult.html, { decodeEntities: false });
-        const seoChecks = analyzeSeo($, fetchResult.html);
+        const seoChecks = analyzeSeo($, fetchResult.html, pageUrl);
         const aeoChecks = analyzeAeo($, fetchResult.html);
         const pagePricingTransparency = analyzePricingTransparency($("body").text() || "");
         const geoChecks = analyzeGeo($, fetchResult.html, pageUrl, trimmedTopic, siteCrawlerAccess, siteWikipediaPresence, siteLlmsTxtResult, pagePricingTransparency);
