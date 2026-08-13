@@ -1,0 +1,27 @@
+# Twittence
+
+> AI visibility audit that scores websites across SEO, AEO (Answer Engine Optimization), GEO
+> (Generative Engine Optimization), and cross-platform sentiment, then runs a self-healing agent to
+> find gaps, generate fixes, and verify results.
+
+Twittence measures whether a page is actually structured to be cited by AI search systems — Google
+AI Overviews, ChatGPT, Perplexity, Claude — not just how well it ranks in traditional search. Scoring
+covers direct-answer structure, information gain, schema clarity, authority and entity signals
+(including AI crawler access via robots.txt and Wikipedia/Wikidata presence), scannability, and
+content freshness.
+
+## Product
+
+- [Homepage](https://twittence.com/): overview, live audit tool, pricing-free signup
+- [How It Works](https://twittence.com/#how): the audit process
+- [Live Citation Tracking](https://twittence.com/#audit-section): checks whether a page is currently
+  cited in Google AI Overview results
+
+## Documentation
+
+- [Scoring Methodology](https://github.com/shams96/twittence/blob/main/docs/scoring-methodology.md):
+  the exact weights and thresholds used for every pillar score
+
+## Contact
+
+Owner: Twittence

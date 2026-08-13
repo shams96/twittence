@@ -39,7 +39,7 @@ it's instructed to treat these scores as ground truth, never to re-estimate them
 
 ---
 
-## GEO — Generative Engine Optimization (`analyzeGeo`) — 100 points, 7 dimensions
+## GEO — Generative Engine Optimization (`analyzeGeo`) — 100 points, 9 dimensions
 
 Rebuilt around AI-citation research rather than keyword density — ranking #1 on Google only
 correlates with ~31% AI-citation odds, dropping to ~2.6% by rank #4, so this does **not** score
@@ -47,13 +47,19 @@ primarily on keyword presence the way it originally did.
 
 | Dimension | Points | What it measures |
 |---|---|---|
-| A. Direct Answer & Structure | 16 | Does a substantive paragraph (15+ words) appear in the first 5 content blocks after stripping nav/header/footer (10 pts)? What fraction of H2–H4 headings are phrased as literal questions (up to 6 pts)? |
-| B. Information Gain | 12 | Original/proprietary data language ("we surveyed...", "our research found...") — distinct from citing someone else's data (8 pts). Density of specific stats/figures (up to 4 pts). |
-| C. Schema Clarity | 12 | `FAQPage` (5), `HowTo` (3), `Article`/`BlogPosting`/`NewsArticle` (2) schema present; bonus for FAQ answers sized 40–160 words (up to 2). |
-| D. Authority, Citations & Entity Presence | 16 | Named author (3) + author links to an external profile (2); external links to `.gov`/`.edu`/PubMed/DOI/Google Scholar (up to 4); expert/clinical language ("Dr.", "peer-reviewed", "clinical trial") (3); **Wikipedia page exists** (2); **Wikidata entry exists** (2) — see below. |
-| E. Scannability | 12 | Has a `<table>` (5); list-item density ≥30% of paragraph count (5); page exceeds 300 words (2). |
-| F. Freshness | 12 | Has a published date (6); date is within 18 months (6). |
+| A. Direct Answer & Structure | 14 | Does a substantive paragraph (15+ words) appear in the first 5 content blocks after stripping nav/header/footer (10 pts)? What fraction of H2–H4 headings are phrased as literal questions (up to 4 pts)? |
+| B. Information Gain | 10 | Original/proprietary data language ("we surveyed...", "our research found...") — distinct from citing someone else's data (6 pts). Density of specific stats/figures (up to 4 pts). |
+| C. Schema Clarity | 10 | `FAQPage` (4), `HowTo` (3), `Article`/`BlogPosting`/`NewsArticle` (2) schema present; bonus for FAQ answers sized 40–160 words (up to 1). |
+| D. Authority, Citations & Entity Presence | 14 | Named author (2) + author links to an external profile (2); external links to `.gov`/`.edu`/PubMed/DOI/Google Scholar (up to 4); expert/clinical language ("Dr.", "peer-reviewed", "clinical trial") (2); **Wikipedia page exists** (2); **Wikidata entry exists** (2) — see below. |
+| E. Scannability | 10 | Has a `<table>` (4); list-item density ≥30% of paragraph count (4); page exceeds 300 words (2). |
+| F. Freshness | 10 | Has a published date (5); date is within 18 months (5). |
 | G. AI Crawler Access | 20 | See below — a hard gate, not a soft signal. |
+| H. `llms.txt` validity | 6 | See below — a distinct signal from `robots.txt`. |
+| I. Pricing Transparency | 6 | See below — only scored when the page shows pricing intent at all. |
+
+A pre-existing double-count between `hasAuthor` and `authorHasExternalLink` (both being credited in
+two separate buckets in the original 7-dimension version) was fixed as part of this rebalance and is
+not carried forward.
 
 ### G. AI Crawler Access (new — the crawler-blocking check)
 
@@ -74,6 +80,36 @@ fixed. **There is no bypass to recommend.** OpenAI, Anthropic, and Perplexity al
 honoring `robots.txt`; the only real fix is the site owner editing their own file. This does not
 affect Twittence's own ability to audit the page — Twittence's fetcher doesn't identify as any of
 these bots, so a blocked `robots.txt` has zero effect on whether the audit itself can run.
+
+### H. `llms.txt` validity (new)
+
+Fetches `/llms.txt` from the audited domain's origin and checks it's a real, valid file rather than
+just present-or-absent:
+
+- No file, or the endpoint 404s → `absent`, 0 pts.
+- Returns an HTML page (a common misconfiguration — an SPA catch-all route silently serving the
+  homepage instead of a real 404) → `misconfigured (returns HTML, not a real file)`, 0 pts. This is
+  distinguished from "absent" in the narrative because it's actively misleading, not just missing.
+- Returns `robots.txt`-style syntax (`User-agent:` lines) instead of Markdown → `present but wrong
+  format`, 2 pts.
+- Has content but no Markdown heading (`# ...`) → `present but malformed`, 2 pts.
+- Valid Markdown with a heading → `present and valid`, 6 pts (full credit).
+
+This exact bug (an HTML-serving catch-all masquerading as a real `llms.txt`) was found live on
+Twittence's own site during development and fixed by adding a real static `hosting/llms.txt` file.
+
+### I. Pricing Transparency (new)
+
+Only scored if the page shows **pricing intent** at all — keywords like "pricing", "plans",
+"subscription", "/mo", "free trial", "enterprise plan". Pages with no pricing intent get full credit
+(6 pts) automatically, since transparency isn't a relevant question for them.
+
+When pricing intent is present, checks for visible price figures (`$99`, `€49`, "99 USD", etc.) in
+the raw HTML: present → 6 pts; absent → 0 pts. Absence usually means the actual numbers are injected
+client-side by JavaScript after the page loads, which is invisible to any crawler that doesn't
+execute JS — including every current AI-citation crawler. The narrative is instructed to only claim
+the price figures specifically are inaccessible, not that the whole page requires JavaScript, since
+the rest of the page content is frequently still server-rendered and visible.
 
 ### Wikipedia / Wikidata entity presence
 

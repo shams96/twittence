@@ -230,7 +230,7 @@ function validateAuditPayload(body) {
   return errors;
 }
 
-function fetchHtml(url) {
+function fetchHtml(url, redirectsLeft = 5) {
   return new Promise((resolve, reject) => {
     const parsed = new URL(url);
     const protocol = parsed.protocol === "https:" ? https : null;
@@ -249,6 +249,19 @@ function fetchHtml(url) {
     };
 
     const req = protocol.request(options, (res) => {
+      // 3xx with a Location header is a normal redirect (e.g. typeform.com/pricing/ -> /pricing) —
+      // follow it instead of treating it as a failure. Confirmed live: this was silently nulling out
+      // every scoring field for any URL that redirects, which is extremely common (trailing slashes,
+      // canonical hostnames, HTTP->HTTPS).
+      if (res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        req.destroy();
+        if (redirectsLeft <= 0) {
+          return reject(new Error("Too many redirects"));
+        }
+        const nextUrl = new URL(res.headers.location, url).toString();
+        return resolve(fetchHtml(nextUrl, redirectsLeft - 1));
+      }
+
       // A non-2xx response (rate limiting, bot-blocking, a dead page) is not the real page — analyzing
       // its body as if it were would silently produce a misleadingly low/wrong score. Confirmed live:
       // a site's Cloudflare rate limiting returned a tiny 429 body that got scored as an empty page.
@@ -744,6 +757,56 @@ async function fetchWikipediaPresence(brandName) {
   return { hasWikipediaPage, hasWikidataEntry, brandNameChecked: brandName };
 }
 
+// GEO signal: does the audited site have a real, well-formed /llms.txt? Fetched and classified
+// carefully — a raw 200 status is not sufficient evidence of presence. Confirmed live (2026-08-13)
+// that Twittence's own site returned 200 for /llms.txt while actually serving the homepage's HTML
+// (the SPA catch-all route intercepting the request), which would have been a false positive if this
+// only checked status code. Real content must look like the llms.txt Markdown spec (starts with a
+// Markdown H1, e.g. "# Site Name") rather than an HTML document or robots.txt-style directives.
+function fetchLlmsTxt(pageUrl) {
+  return new Promise((resolve) => {
+    let origin;
+    try {
+      origin = new URL(pageUrl).origin;
+    } catch (_) {
+      return resolve(null);
+    }
+    https.get(`${origin}/llms.txt`, { headers: { "User-Agent": "TwittenceBot/1.0" }, timeout: 8000 }, (res) => {
+      if (res.statusCode !== 200) { res.resume(); return resolve(null); }
+      let data = "";
+      res.on("data", (c) => (data += c));
+      res.on("end", () => resolve(data));
+    }).on("error", () => resolve(null)).on("timeout", function () { this.destroy(); resolve(null); });
+  });
+}
+
+function analyzeLlmsTxt(content) {
+  if (content === null) return { llmsTxtStatus: "absent", llmsTxtScore: 0 };
+  const trimmed = content.trim();
+  const looksLikeHtml = /^<!DOCTYPE|^<html/i.test(trimmed);
+  if (looksLikeHtml) return { llmsTxtStatus: "misconfigured (returns HTML, not a real file)", llmsTxtScore: 0 };
+  const looksLikeRobotsTxt = /^user-agent:/im.test(trimmed);
+  if (looksLikeRobotsTxt) return { llmsTxtStatus: "present but wrong format (robots.txt syntax, not Markdown)", llmsTxtScore: 2 };
+  const hasMarkdownHeading = /^#\s+\S/m.test(trimmed);
+  if (!hasMarkdownHeading) return { llmsTxtStatus: "present but malformed (no Markdown heading)", llmsTxtScore: 2 };
+  return { llmsTxtStatus: "present and valid", llmsTxtScore: 6 };
+}
+
+// GEO signal: pricing-intent language present without any accompanying dollar/currency figures —
+// a real, precise finding (not a generic "requires JavaScript" guess). Confirmed live against
+// typeform.com/pricing: the raw HTML contains substantial real text (2,768 words) and plan-tier names
+// (Basic/Plus/Business/Enterprise) — this is NOT an empty JS shell — but zero dollar amounts appear
+// anywhere in that same raw HTML, meaning the actual price figures are injected by a separate
+// client-side call an AI crawler (which doesn't execute JavaScript) will never see. Only scored when
+// the page shows pricing intent at all — a page that isn't about pricing shouldn't be penalized for
+// not mentioning a dollar figure.
+function analyzePricingTransparency(bodyText) {
+  const hasPricingIntent = /\b(pricing|plans?|subscription|per month|per year|\/mo\b|\/yr\b|free trial|starter|basic|premium|enterprise plan)\b/i.test(bodyText);
+  if (!hasPricingIntent) return { pricingIntentDetected: false, hasVisiblePriceFigures: null, pricingTransparencyScore: 6 };
+  const hasVisiblePriceFigures = /\$\d|\d+\s*(?:usd|eur|gbp)\b|€\d|£\d/i.test(bodyText);
+  return { pricingIntentDetected: true, hasVisiblePriceFigures, pricingTransparencyScore: hasVisiblePriceFigures ? 6 : 0 };
+}
+
 function detectSchemaTypes($) {
   const types = new Set();
   $("script[type='application/ld+json']").each((_, el) => {
@@ -763,7 +826,7 @@ function detectSchemaTypes($) {
 // extractability (does the page lead with an answer, are headings phrased as real questions, are
 // FAQ answers sized for lifting into a response) and authority/freshness signals are what the
 // research ties to actual citation likelihood.
-function analyzeGeo($, html, url, topic, crawlerAccess, wikipediaPresence) {
+function analyzeGeo($, html, url, topic, crawlerAccess, wikipediaPresence, llmsTxtResult, pricingTransparency) {
   const authority = detectAuthorityAndFreshness($);
   const headingQ = analyzeHeadingQuestions($);
   const faqQuality = analyzeFaqQuality($);
@@ -825,42 +888,50 @@ function analyzeGeo($, html, url, topic, crawlerAccess, wikipediaPresence) {
     hasWikipediaPage: wikipediaPresence?.hasWikipediaPage ?? false,
     hasWikidataEntry: wikipediaPresence?.hasWikidataEntry ?? false,
     brandNameChecked: wikipediaPresence?.brandNameChecked ?? null,
+    llmsTxtStatus: llmsTxtResult?.llmsTxtStatus ?? "not checked",
+    pricingIntentDetected: pricingTransparency?.pricingIntentDetected ?? false,
+    hasVisiblePriceFigures: pricingTransparency?.hasVisiblePriceFigures ?? null,
   };
 
-  // Seven-dimension rebalance (100 pts total) covering the full GEO Layer-1 rubric plus the crawler
-  // access gate: Direct Answer & Structure, Information Gain, Schema Clarity, Authority & Citations
-  // (now includes Wikipedia/Wikidata entity presence), Scannability, Freshness, AI Crawler Access.
-  // FAQ/schema/heading signals folded in rather than scored standalone to avoid double-counting — a
-  // prior version of this function also double-counted hasAuthor/authorHasExternalLink across two
-  // buckets; fixed here as part of this rebalance, not carried forward.
+  // Nine-dimension rebalance (100 pts total) covering the full GEO Layer-1 rubric plus two gate
+  // checks: AI Crawler Access and Pricing Transparency. FAQ/schema/heading signals folded in rather
+  // than scored standalone to avoid double-counting — a prior version of this function also
+  // double-counted hasAuthor/authorHasExternalLink across two buckets; fixed as part of an earlier
+  // rebalance, not carried forward.
   let geoScore = 0;
-  // A) Direct Answer & Structure — 16
-  geoScore += checks.hasEarlyDirectAnswer ? 10 : 0;
-  geoScore += Math.min(6, Math.round(checks.questionHeadingRatio * 0.06));
-  // B) Information Gain / Original Data — 12
-  geoScore += checks.hasOriginalDataLanguage ? 8 : 0;
-  geoScore += Math.min(4, checks.statDensity);
-  // C) Schema & Structural Clarity — 12
-  geoScore += (checks.hasFAQSchema ? 5 : 0) + (checks.hasHowToSchema ? 3 : 0) + (checks.hasArticleSchema ? 2 : 0);
-  geoScore += checks.hasFAQSchema ? Math.round((checks.faqWellSizedAnswers / Math.max(checks.faqQuestionCount, 1)) * 2) : 0;
-  // D) Authority, Citations & Entity Presence — 16 (Wikipedia/Wikidata are a real, free, automated
+  // A) Direct Answer & Structure — 14
+  geoScore += checks.hasEarlyDirectAnswer ? 9 : 0;
+  geoScore += Math.min(5, Math.round(checks.questionHeadingRatio * 0.05));
+  // B) Information Gain / Original Data — 10
+  geoScore += checks.hasOriginalDataLanguage ? 7 : 0;
+  geoScore += Math.min(3, checks.statDensity);
+  // C) Schema & Structural Clarity — 10
+  geoScore += (checks.hasFAQSchema ? 4 : 0) + (checks.hasHowToSchema ? 3 : 0) + (checks.hasArticleSchema ? 2 : 0);
+  geoScore += checks.hasFAQSchema ? Math.round((checks.faqWellSizedAnswers / Math.max(checks.faqQuestionCount, 1)) * 1) : 0;
+  // D) Authority, Citations & Entity Presence — 14 (Wikipedia/Wikidata are a real, free, automated
   // check for whether this brand exists in the knowledge graph AI systems draw entity facts from —
   // distinct from on-page citation links, which only show the page cites others, not that the page's
   // own subject is independently verifiable).
   geoScore += (checks.hasAuthor ? 3 : 0) + (checks.authorHasExternalLink ? 2 : 0);
-  geoScore += Math.min(4, checks.externalCitationLinks * 2);
+  geoScore += Math.min(3, checks.externalCitationLinks * 2);
   geoScore += checks.hasExpertOrClinicalLanguage ? 3 : 0;
   geoScore += checks.hasWikipediaPage ? 2 : 0;
-  geoScore += checks.hasWikidataEntry ? 2 : 0;
-  // E) Scannability & Formatting — 12
-  geoScore += checks.hasTable ? 5 : 0;
-  geoScore += checks.hasGoodListDensity ? 5 : 0;
+  geoScore += checks.hasWikidataEntry ? 1 : 0;
+  // E) Scannability & Formatting — 10
+  geoScore += checks.hasTable ? 4 : 0;
+  geoScore += checks.hasGoodListDensity ? 4 : 0;
   geoScore += wordCount > 300 ? 2 : 0;
-  // F) Freshness — 12
-  geoScore += (checks.hasDatePublished ? 6 : 0) + (checks.isRecentlyUpdated ? 6 : 0);
+  // F) Freshness — 10
+  geoScore += (checks.hasDatePublished ? 5 : 0) + (checks.isRecentlyUpdated ? 5 : 0);
   // G) AI Crawler Access — 20 (see analyzeCrawlerAccess: no robots.txt = full 20, since absence is
   // the standard "everything allowed" default, not a penalty).
   geoScore += crawlerAccess?.crawlerAccessScore ?? 20;
+  // H) llms.txt — 6 (see analyzeLlmsTxt: a raw 200 is not sufficient evidence — an HTML-fallback
+  // "false positive" is scored as absent, confirmed against a real case on Twittence's own site).
+  geoScore += llmsTxtResult?.llmsTxtScore ?? 0;
+  // I) Pricing Transparency — 6 (only scored against pages that actually show pricing intent; a page
+  // with no pricing language at all gets full points by default, since it isn't a pricing page).
+  geoScore += pricingTransparency?.pricingTransparencyScore ?? 6;
   checks.geoScore = Math.min(100, geoScore);
   return checks;
 }
@@ -1144,17 +1215,19 @@ app.post("/api/run-audit", verifyToken, async (req, res) => {
 
     const seoRelevant = ["all", "technical", "seo"].includes(trimmedVertical);
     const geoRelevant = ["all", "geo"].includes(trimmedVertical);
-    const [fetchOutcome, externalBenchmark, robotsTxt] = await Promise.all([
+    const [fetchOutcome, externalBenchmark, robotsTxt, llmsTxtContent] = await Promise.all([
       fetchHtmlWithFallback(trimmedUrl).catch((fetchError) => {
         console.error("Page fetch failed:", fetchError.message);
         return null;
       }),
       seoRelevant ? fetchPageSpeedInsights(trimmedUrl) : Promise.resolve(null),
       geoRelevant ? fetchRobotsTxt(trimmedUrl) : Promise.resolve(null),
+      geoRelevant ? fetchLlmsTxt(trimmedUrl) : Promise.resolve(null),
     ]);
     const html = fetchOutcome?.html || null;
     const crawlerAccess = geoRelevant ? analyzeCrawlerAccess(robotsTxt) : null;
     const wikipediaPresence = geoRelevant ? await fetchWikipediaPresence(deriveBrandNameFromUrl(trimmedUrl)) : null;
+    const llmsTxtResult = geoRelevant ? analyzeLlmsTxt(llmsTxtContent) : null;
 
     let seoAnalysis = null, aeoAnalysis = null, geoAnalysis = null, sentimentAnalysis = null, contentAnalysis = null, localAnalysis = null;
     let $ = null;
@@ -1164,7 +1237,8 @@ app.post("/api/run-audit", verifyToken, async (req, res) => {
       $ = cheerio.load(html, { decodeEntities: false });
       seoAnalysis = analyzeSeo($, html);
       aeoAnalysis = analyzeAeo($, html);
-      geoAnalysis = analyzeGeo($, html, trimmedUrl, trimmedTopic, crawlerAccess, wikipediaPresence);
+      const pricingTransparency = geoRelevant ? analyzePricingTransparency($("body").text() || "") : null;
+      geoAnalysis = analyzeGeo($, html, trimmedUrl, trimmedTopic, crawlerAccess, wikipediaPresence, llmsTxtResult, pricingTransparency);
       sentimentAnalysis = analyzeSentiment(html);
       contentAnalysis = analyzeContent($, html);
       localAnalysis = analyzeLocal($, html);
@@ -1199,6 +1273,8 @@ Ground your reasoning in how AI search actually works, not outdated keyword-rank
 - Structure the selfHealingPlan phases to mirror the AI-answer format proven to get extracted: a phase for tightening the direct-answer opening, a phase for adding scannable structure (tables/lists) if missing, a phase for authority/citation signals if missing, and a phase for FAQ/schema if missing — skip any phase the evidence shows is already strong.
 - If the evidence shows blockedAiCrawlers is non-empty, that is the single highest-priority finding, full stop — make it the first finding and the first selfHealingPlan phase, and say explicitly that no other GEO work matters until robots.txt is fixed, since a blocked crawler (GPTBot/ClaudeBot/PerplexityBot/etc.) cannot see any of the page's content regardless of how well it's structured. There is no bypass to suggest — the only real fix is the site owner editing their own robots.txt to allow the named bots; say that plainly rather than implying anything else is possible.
 - hasWikipediaPage / hasWikidataEntry reflect whether this brand exists in the public knowledge graph AI systems draw entity facts from (checked via the real Wikipedia/Wikidata search APIs, not inferred) — if both are false, note this as a real, addressable gap (most businesses legitimately won't have one yet — frame it as an opportunity, not a defect) rather than ignoring it.
+- llmsTxtStatus tells you whether /llms.txt exists and is well-formed — "absent" means never created; "misconfigured (returns HTML, not a real file)" is a distinct and worse problem (usually a catch-all route serving the homepage instead of a real static file — flag this specifically, since it looks like it works but doesn't); "present but wrong format" means the wrong syntax was used (e.g. robots.txt directives instead of Markdown); only "present and valid" is a real pass.
+- If pricingIntentDetected is true and hasVisiblePriceFigures is false, this page discusses plans/pricing/subscriptions by name but contains zero actual dollar/currency figures in the raw HTML an AI crawler would see — the numbers are very likely being injected by a separate client-side call after page load. Call this out specifically and by name (an AI system asked "how much does this cost" cannot answer it from this page), and do NOT describe this as "the whole page requires JavaScript" — the evidence only supports the price figures specifically being client-side-only, not the entire page.
 
 Never invent a score that contradicts the supplied analysis, and never invent a score for something the evidence doesn't cover. Respond with ONLY valid JSON, no markdown fences, no commentary, matching this shape:
 {"summary": string, "findings": string[], "recommendations": string[], "selfHealingPlan": [{"phase": string, "description": string}]}`;
@@ -1586,11 +1662,13 @@ app.post("/api/site-wide-audit", verifyToken, async (req, res) => {
     // robots.txt and brand knowledge-graph presence are domain-level, not page-level — fetched once
     // for the whole site-wide run rather than once per discovered page (up to 50), which would be
     // redundant work against the same file/entity every time.
-    const [siteRobotsTxt, siteWikipediaPresence] = await Promise.all([
+    const [siteRobotsTxt, siteWikipediaPresence, siteLlmsTxtContent] = await Promise.all([
       fetchRobotsTxt(trimmedUrl),
       fetchWikipediaPresence(deriveBrandNameFromUrl(trimmedUrl)),
+      fetchLlmsTxt(trimmedUrl),
     ]);
     const siteCrawlerAccess = analyzeCrawlerAccess(siteRobotsTxt);
+    const siteLlmsTxtResult = analyzeLlmsTxt(siteLlmsTxtContent);
     const results = [];
     for (const pageUrl of discovered) {
       try {
@@ -1598,7 +1676,8 @@ app.post("/api/site-wide-audit", verifyToken, async (req, res) => {
         const $ = cheerio.load(fetchResult.html, { decodeEntities: false });
         const seoChecks = analyzeSeo($, fetchResult.html);
         const aeoChecks = analyzeAeo($, fetchResult.html);
-        const geoChecks = analyzeGeo($, fetchResult.html, pageUrl, trimmedTopic, siteCrawlerAccess, siteWikipediaPresence);
+        const pagePricingTransparency = analyzePricingTransparency($("body").text() || "");
+        const geoChecks = analyzeGeo($, fetchResult.html, pageUrl, trimmedTopic, siteCrawlerAccess, siteWikipediaPresence, siteLlmsTxtResult, pagePricingTransparency);
         const sentimentChecks = analyzeSentiment(fetchResult.html);
         const message = await anthropic.messages.create({ model: "claude-sonnet-5", max_tokens: 2048, system: "You are an expert audit analyst. The pillar scores below are already computed from a real crawl — treat them as ground truth, do not re-estimate them. Explain what they mean and give a consolidated recommendation. Respond with ONLY valid JSON, no markdown fences: {\"summary\": string, \"findings\": string[], \"recommendations\": string[]}", messages: [{ role: "user", content: `Page: ${pageUrl}\nSEO score: ${seoChecks.seoScore}, AEO score: ${aeoChecks.aeoScore}, GEO score: ${geoChecks.geoScore}, Sentiment score: ${sentimentChecks.sentimentScore}.` }] });
         const textBlock = message.content.find((b) => b.type === "text");
