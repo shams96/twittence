@@ -404,12 +404,6 @@ if (themeBtn) {
   });
 }
 
-document.querySelectorAll(".dial-card .learn").forEach((btn) => {
-  btn.addEventListener("click", () => {
-    btn.closest(".dial-card").classList.toggle("open");
-  });
-});
-
 function setHS(step, state) {
   const el = document.getElementById("hs-" + step);
   if (!el) return;
