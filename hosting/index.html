@@ -3,8 +3,8 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Twittence — AI Visibility Engine for Search, AI & Social</title>
-<meta name="description" content="Twittence audits your brand across SEO, Answer Engine Optimization, Generative Engine Optimization, and cross-platform sentiment — then runs a self-healing agent loop to find gaps, generate fixes, and verify results.">
+<title>Twittence — AI Visibility Audits for Wellness & Skincare DTC Brands</title>
+<meta name="description" content="Twittence audits wellness, skincare, and beauty-from-within DTC brands across SEO, Answer Engine Optimization, Generative Engine Optimization, and cross-platform sentiment — then runs a self-healing agent loop to find gaps, generate fixes, and verify results. Works for any site; built for supplement, functional-beverage, and skincare brands first.">
 <meta name="theme-color" content="#15110c">
 <link rel="canonical" href="https://twittence.com/">
 <link rel="icon" type="image/svg+xml" href="/assets/favicon.svg">
@@ -57,10 +57,10 @@
 </div></nav>
 
 <section class="hero"><div class="container">
-  <span class="badge">AI Visibility Audit</span>
-  <p style="margin:.5rem 0 0;font-size:.85rem;color:var(--text-dim)">Sign in once. Keep the report forever.</p>
-  <h1 class="fade-in">See Exactly Where <span class="hl">ChatGPT, Perplexity &amp; Google AI</span> Overlook Your Brand — Then Close the Gap Automatically</h1>
-  <p class="lead">Twittence scores you across SEO, Answer Engines, generative-AI citation readiness, and sentiment. A self-healing agent finds the precise fixes and verifies them. One clear audit. Every channel that now drives discovery.</p>
+  <span class="badge">Built for Wellness &amp; Skincare DTC</span>
+  <p style="margin:.5rem 0 0;font-size:.85rem;color:var(--text-dim)">Free score in under 2 minutes. No account needed.</p>
+  <h1 class="fade-in">See Exactly Where <span class="hl">ChatGPT, Perplexity &amp; Google AI</span> Overlook Your Supplement, Skincare, or Wellness Brand</h1>
+  <p class="lead">When someone asks an AI "what's the best collagen supplement" or "is this ingredient safe," is your brand the answer? Twittence scores wellness and beauty-from-within DTC sites across SEO, Answer Engines, generative-AI citation readiness, and sentiment — then a self-healing agent finds the precise fixes. Works for any site; tuned first for the brands living or dying by AI-driven discovery.</p>
   <div style="display:flex;gap:1rem;justify-content:center;flex-wrap:wrap;margin-top:1.5rem">
     <button class="btn btn-primary" onclick="scrollToForm()">Get My Free Visibility Score</button>
     <a href="#how" class="btn btn-ghost">See How It Works</a>
@@ -127,13 +127,66 @@
   </div>
 </div></section>
 
+<section id="pricing" class="scroll-section"><div class="container">
+  <div class="section-head" style="text-align:center;max-width:52ch;margin:0 auto 1.5rem">
+    <span class="eyebrow">Pricing</span>
+    <h2 style="font-size:1.5rem;margin-top:.4rem">One free score. Unlimited fixes for Founding Members.</h2>
+    <p id="foundingCounter" class="badge" style="margin-top:.6rem">Loading spots left&hellip;</p>
+  </div>
+  <div class="pricing-grid">
+    <div class="pricing-card">
+      <h3>Free</h3>
+      <div class="pricing-price">$0<span>/mo</span></div>
+      <ul class="pricing-features">
+        <li>1 audit per month</li>
+        <li>Full 4-pillar score (SEO / AEO / GEO / Sentiment)</li>
+        <li>Findings, recommendations &amp; self-healing plan <strong>not included</strong></li>
+      </ul>
+      <button class="btn-ghost-sm" style="width:100%;padding:.7rem" onclick="scrollToForm()">Get My Free Score</button>
+    </div>
+    <div class="pricing-card pricing-featured">
+      <span class="badge" style="margin-bottom:.5rem">Limited seats</span>
+      <h3>Founding Member</h3>
+      <div class="pricing-price"><span id="foundingPriceDisplay">$9.99</span><span>/mo</span></div>
+      <p style="font-size:.78rem;color:var(--text-dim);margin:.2rem 0 0">First 12 months, then $49/mo. Locked in for as long as spots remain.</p>
+      <ul class="pricing-features">
+        <li>Unlimited audits</li>
+        <li>Full findings, recommendations &amp; self-healing plan</li>
+        <li>Live citation-check credits included</li>
+      </ul>
+      <button class="btn-action" id="foundingSubscribeBtn" onclick="becomeFoundingMember()">Become a Founding Member</button>
+    </div>
+    <div class="pricing-card">
+      <h3>Agency</h3>
+      <div class="pricing-price">POA</div>
+      <ul class="pricing-features">
+        <li>White-label reports</li>
+        <li>Multi-client audit management</li>
+        <li>Priority support</li>
+      </ul>
+      <button class="btn-ghost-sm" style="width:100%;padding:.7rem" onclick="contactAgencySales()">Contact Sales</button>
+    </div>
+  </div>
+</div></section>
+
+<div class="modal-backdrop hidden" id="signupModal">
+  <div class="modal-box">
+    <button class="modal-close" onclick="closeSignupModal()" aria-label="Close">&times;</button>
+    <h3>Unlock Findings &amp; Fixes</h3>
+    <p style="color:var(--text-dim);font-size:.9rem;margin-bottom:1rem">Your score is free. Founding Member unlocks findings, recommendations, and the self-healing plan for every audit.</p>
+    <div class="pricing-price" style="justify-content:center;display:flex;align-items:baseline;gap:.2rem"><span id="foundingPriceDisplayModal">$9.99</span><span>/mo — first 12 months</span></div>
+    <button class="btn-action" onclick="becomeFoundingMember()">Become a Founding Member</button>
+    <p style="text-align:center;margin-top:.75rem"><a href="#pricing" onclick="closeSignupModal()" style="font-size:.8rem">See full pricing</a></p>
+  </div>
+</div>
+
 <section id="audit-section" class="scroll-section"><div class="card">
   <h2>Run Your Audit</h2>
   <p style="margin-bottom:1.25rem">Select your focus below. All fields are required — everything is a selection, no file uploads needed. Claude API analyzes your page and returns a complete 4-pillar score.</p>
   <div class="form-grid">
     <div class="form-group"><label for="url">Website URL</label><input type="url" id="url" placeholder="https://yourdomain.com" required></div>
     <div class="form-group"><label for="topic">Audit Focus</label>
-      <select id="topic" required><option value="">— Select focus area —</option><option value="all">Run All — Complete Audit</option><option value="landing page optimization">Landing Page Optimization</option><option value="e-commerce product pages">E-Commerce Product Pages</option><option value="blog content strategy">Blog Content Strategy</option><option value="local service pages">Local Service Pages</option><option value="SaaS documentation">SaaS Documentation</option><option value="lead generation pages">Lead Generation Pages</option><option value="content cluster">Content Cluster / Pillar</option><option value="brand authority">Brand Authority Building</option><option value="conversion optimization">CRO &amp; Conversions</option></select>
+      <select id="topic" required><option value="">— Select focus area —</option><option value="all">Run All — Complete Audit</option><option value="wellness dtc product pages">★ Wellness / Skincare / Beauty DTC</option><option value="e-commerce product pages">E-Commerce Product Pages</option><option value="landing page optimization">Landing Page Optimization</option><option value="blog content strategy">Blog Content Strategy</option><option value="local service pages">Local Service Pages</option><option value="SaaS documentation">SaaS Documentation</option><option value="lead generation pages">Lead Generation Pages</option><option value="content cluster">Content Cluster / Pillar</option><option value="brand authority">Brand Authority Building</option><option value="conversion optimization">CRO &amp; Conversions</option></select>
     </div>
     <div class="form-group full"><label for="vertical">Marketing Vertical — ordered by impact on visibility</label><div class="section-label" id="verticalHint">Priority order: foundation first, compounding factors last</div>
       <select id="vertical" required><option value="">— Select vertical —</option><option value="all">Run All — Full 4-Pillar Audit</option><option value="technical">1. Technical SEO — crawlability, speed, indexation</option><option value="seo">2. On-Page SEO — content, keywords, meta, headings</option><option value="aeo">3. Answer Engine Optimization — featured snippets, FAQs, schema</option><option value="geo">4. Generative Engine Optimization — AI crawler access, citations, entity presence</option><option value="sentiment">5. Cross-Platform Sentiment — trust, social proof, reviews</option><option value="content">6. Content Strategy — sustainability, topical authority</option><option value="local">7. Local SEO — GMB, citations, or retail/stockist availability</option><option value="ppc">8. PPC / Paid Search — immediate visibility, keyword bids</option><option value="social">9. Social Media — amplification, engagement signals</option><option value="email">10. Email Marketing — retention, repeat traffic</option></select>
@@ -153,27 +206,31 @@
 </div></section>
 
 <section><div class="container"><div class="card"><h2>Live Citation Tracking <span class="badge" style="margin-left:.5rem">Optional</span></h2>
-  <p style="margin-bottom:1rem;color:var(--text-dim);font-size:.9rem">Check whether a page is actually being cited in Google AI Overviews / ChatGPT search results right now. Requires either your own SERP API key (free, no markup) or prepaid credits.</p>
-  <p style="margin-bottom:1rem;color:var(--text-dim);font-size:.8rem"><strong>Your key never touches our servers for storage.</strong> It's saved only in this browser, sent per-request for one-time use only, and cleared automatically the moment you sign out. We never write it to a database.</p>
+  <p style="margin-bottom:1rem;color:var(--text-dim);font-size:.9rem">Check whether a page is actually being cited in Google AI Overviews / ChatGPT search results right now. Paid plans include bundled checks every month, zero setup required — bring your own key only if you go past that.</p>
   <div id="citationStatus" class="status status-info" style="margin-bottom:1rem">Sign in to check your citation tracking status.</div>
   <div id="citationPanel" class="hidden">
-    <div class="mini-steps">
-      <div class="ms-step"><span class="ms-num">1</span><span>Paste your DataForSEO or SerpApi key below and click <strong>Save my API key</strong> — it's saved only in this browser, not sent to us to store.</span></div>
-      <div class="ms-step"><span class="ms-num">2</span><span>Enter a keyword in the report below and click <strong>Check now</strong> — the key is sent with just that one request, used once, then discarded server-side.</span></div>
-      <div class="ms-step"><span class="ms-num">3</span><span>Sign out (or click <strong>Remove saved key</strong>) any time to wipe it from this browser immediately.</span></div>
+    <div style="display:flex;gap:.6rem;flex-wrap:wrap;margin-bottom:1rem">
+      <button class="btn-action" style="width:auto;padding:0.6rem 1.2rem" onclick="buyCitationCredits()">Buy more credits</button>
     </div>
-    <div class="form-grid">
-      <div class="form-group"><label for="citationProvider">Provider (bring your own key)</label>
-        <select id="citationProvider"><option value="dataforseo">DataForSEO</option><option value="serpapi">SerpApi</option></select>
+    <div id="citationByokSection" class="hidden">
+      <p style="margin-bottom:1rem;color:var(--text-dim);font-size:.8rem"><strong>Your key never touches our servers for storage.</strong> It's saved only in this browser, sent per-request for one-time use only, and cleared automatically the moment you sign out. We never write it to a database.</p>
+      <div class="mini-steps">
+        <div class="ms-step"><span class="ms-num">1</span><span>Paste your DataForSEO or SerpApi key below and click <strong>Save my API key</strong> — it's saved only in this browser, not sent to us to store.</span></div>
+        <div class="ms-step"><span class="ms-num">2</span><span>Enter a keyword in the report below and click <strong>Check now</strong> — the key is sent with just that one request, used once, then discarded server-side.</span></div>
+        <div class="ms-step"><span class="ms-num">3</span><span>Sign out (or click <strong>Remove saved key</strong>) any time to wipe it from this browser immediately.</span></div>
       </div>
-      <div class="form-group"><label for="citationApiKey">API Key (login, for DataForSEO) <span id="citationKeySavedBadge" class="badge hidden" style="margin-left:.3rem;font-size:.65rem">&#10003; Saved</span></label><input type="password" id="citationApiKey" placeholder="Your API key"></div>
-      <div class="form-group" id="citationSecretGroup"><label for="citationApiSecret">API Secret (password, DataForSEO only)</label><input type="password" id="citationApiSecret" placeholder="Required for DataForSEO"></div>
-    </div>
-    <p style="margin:.4rem 0 0;color:var(--text-dim);font-size:.75rem">Saved to this browser only — never sent to our servers to store. Stays saved across reloads while you're signed in; <strong>cleared automatically the moment you sign out</strong> (not just when you close the tab).</p>
-    <div style="display:flex;gap:.6rem;flex-wrap:wrap;margin-top:.5rem">
-      <button class="btn-ghost-sm" onclick="saveCitationKey()">Save my API key</button>
-      <button class="btn-ghost-sm" onclick="removeCitationKey()">Remove saved key</button>
-      <button class="btn-action" style="width:auto;padding:0.6rem 1.2rem" onclick="buyCitationCredits()">Buy credits</button>
+      <div class="form-grid">
+        <div class="form-group"><label for="citationProvider">Provider (bring your own key)</label>
+          <select id="citationProvider"><option value="dataforseo">DataForSEO</option><option value="serpapi">SerpApi</option></select>
+        </div>
+        <div class="form-group"><label for="citationApiKey">API Key (login, for DataForSEO) <span id="citationKeySavedBadge" class="badge hidden" style="margin-left:.3rem;font-size:.65rem">&#10003; Saved</span></label><input type="password" id="citationApiKey" placeholder="Your API key"></div>
+        <div class="form-group" id="citationSecretGroup"><label for="citationApiSecret">API Secret (password, DataForSEO only)</label><input type="password" id="citationApiSecret" placeholder="Required for DataForSEO"></div>
+      </div>
+      <p style="margin:.4rem 0 0;color:var(--text-dim);font-size:.75rem">Saved to this browser only — never sent to our servers to store. Stays saved across reloads while you're signed in; <strong>cleared automatically the moment you sign out</strong> (not just when you close the tab).</p>
+      <div style="display:flex;gap:.6rem;flex-wrap:wrap;margin-top:.5rem">
+        <button class="btn-ghost-sm" onclick="saveCitationKey()">Save my API key</button>
+        <button class="btn-ghost-sm" onclick="removeCitationKey()">Remove saved key</button>
+      </div>
     </div>
   </div>
 </div></div></section>

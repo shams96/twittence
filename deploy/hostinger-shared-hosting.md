@@ -114,6 +114,27 @@ Google Sign-In will fail with `auth/unauthorized-domain` until your domain is ad
 Firebase Console → Authentication → Settings → **Authorized domains** → add `twittence.com` (and
 `www.twittence.com` if you'll use that too).
 
+## Weekly re-audit email (Task 5)
+
+`POST /api/internal/weekly-reaudit` re-audits every paid user's most recently audited page and emails
+score deltas. It's not scheduled automatically — trigger it weekly via hPanel → **Advanced → Cron
+Jobs**, once a week (e.g. Monday 09:00):
+
+```
+curl -s -X POST -H "x-internal-secret: $INTERNAL_FETCH_SECRET" https://twittence.com/api/internal/weekly-reaudit
+```
+
+To test against a single account instead of every paid user (the acceptance-test path), pass a uid:
+
+```
+curl -s -X POST -H "x-internal-secret: $INTERNAL_FETCH_SECRET" -H "Content-Type: application/json" \
+  -d '{"uid":"<test-uid>"}' https://twittence.com/api/internal/weekly-reaudit
+```
+
+Requires `INTERNAL_FETCH_SECRET` and the `SMTP_*` vars (see `.env.production.example`) set on this
+deployment — without SMTP configured, the job still runs and records the re-audit, but logs
+`Email not sent (SMTP not configured)` instead of sending.
+
 ## Redeploying after code changes
 
 Rebuild the zip with the same nested layout (step 1), re-upload through the same Deployments screen,

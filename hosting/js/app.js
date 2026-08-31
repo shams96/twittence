@@ -2,6 +2,8 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.10.0/fireba
 import {
   getAuth,
   signInWithPopup,
+  signInAnonymously,
+  linkWithPopup,
   GoogleAuthProvider,
   onAuthStateChanged,
   signOut,
@@ -44,11 +46,24 @@ function clearByok() {
   localStorage.removeItem(BYOK_STORAGE_KEY);
 }
 
+// Task 2 (post-audit paywall): a free-tier audit no longer requires clicking "Sign In" first — every
+// visitor gets a real Firebase uid immediately (anonymous auth), so the server can rate-limit and
+// gate consistently whether or not they ever create a real account. "Sign In" now means upgrading to
+// a persistent Google identity (needed for billing, history across devices, and Founding Member
+// signup) — see handleAuth() below.
 onAuthStateChanged(auth, async (user) => {
+  if (!user) {
+    try {
+      await signInAnonymously(auth);
+    } catch (err) {
+      console.error("Anonymous sign-in failed:", err.message);
+    }
+    return; // onAuthStateChanged fires again once the anonymous session is established
+  }
   currentUser = user;
   const authBtn = document.getElementById("authBtn");
   const userEmail = document.getElementById("userEmail");
-  if (user) {
+  if (!user.isAnonymous) {
     authBtn.textContent = "Sign Out";
     userEmail.textContent = user.email;
     userEmail.classList.remove("hidden");
@@ -61,6 +76,7 @@ onAuthStateChanged(auth, async (user) => {
     document.getElementById("citationStatus").textContent = "Sign in to check your citation tracking status.";
     clearByok();
   }
+  loadPricingStatus();
 });
 
 function syncByokBadge() {
@@ -73,6 +89,7 @@ async function loadCitationStatus() {
   if (!currentUser) return;
   const statusEl = document.getElementById("citationStatus");
   const panel = document.getElementById("citationPanel");
+  const byokSection = document.getElementById("citationByokSection");
   const byok = getByok();
   syncByokBadge();
   try {
@@ -81,15 +98,27 @@ async function loadCitationStatus() {
     const data = await res.json();
     if (!res.ok) throw new Error(data.error || "Could not load citation status");
     panel.classList.remove("hidden");
+
+    // Task 4: BYOK is a fallback, not the first step — only shown once the tier's bundled monthly
+    // checks (zero setup, if any) and any purchased credits are both exhausted, or the user already
+    // has a key saved (so they can still remove it).
+    if (byokSection) byokSection.classList.toggle("hidden", !data.needsByok && !byok);
+
     if (byok) {
       statusEl.className = "status status-success";
-      statusEl.textContent = `Using your own ${byok.provider} API key, saved in this browser — no credits charged, key never sent to our servers for storage. Cleared automatically when you sign out.`;
+      statusEl.textContent = `Using your own ${byok.provider} API key, saved in this browser — no credits or bundled checks charged, key never sent to our servers for storage. Cleared automatically when you sign out.`;
+    } else if (data.bundleRemaining > 0) {
+      statusEl.className = "status status-success";
+      statusEl.textContent = `${data.bundleRemaining}/${data.bundleCap} bundled citation checks left this month — included in your plan, no setup needed.`;
     } else if (data.credits > 0) {
       statusEl.className = "status status-success";
       statusEl.textContent = `${data.credits} citation check credit${data.credits === 1 ? "" : "s"} remaining.`;
     } else if (!data.managedAvailable && !data.billingConfigured) {
       statusEl.className = "status status-info";
       statusEl.textContent = "Live citation tracking isn't fully set up on this deployment yet — bring your own API key below to use it now.";
+    } else if (data.bundleCap > 0) {
+      statusEl.className = "status status-info";
+      statusEl.textContent = "This month's bundled checks are used up. Add your own key below (free) or buy more credits.";
     } else {
       statusEl.className = "status status-info";
       statusEl.textContent = "No API key saved and no credits on file. Add your own key (free) or buy credits below.";
@@ -201,14 +230,34 @@ window.buyCitationCredits = async () => {
   }
 };
 
+// Upgrades the current anonymous session to a real Google account, or signs a real account out. This
+// is also called from the signup modal (see openSignupModal) when an anonymous visitor tries to
+// unlock paid features — linking (not switching accounts) preserves their uid, so their free-tier
+// audit count and any audits already run under this session carry over rather than resetting.
+window.upgradeToGoogle = async () => {
+  if (!currentUser || !currentUser.isAnonymous) return currentUser;
+  try {
+    const result = await linkWithPopup(currentUser, new GoogleAuthProvider());
+    return result.user;
+  } catch (err) {
+    if (err.code === "auth/credential-already-in-use") {
+      // That Google account already has its own (non-anonymous) uid with its own history — sign into
+      // it directly instead of linking, since linking a credential already owned elsewhere is rejected.
+      const result = await signInWithPopup(auth, new GoogleAuthProvider());
+      return result.user;
+    }
+    throw err;
+  }
+};
+
 window.handleAuth = async () => {
   const btn = document.getElementById("authBtn");
   setButtonLoading(btn, true);
   try {
-    if (currentUser) {
+    if (currentUser && !currentUser.isAnonymous) {
       await signOut(auth);
     } else {
-      await signInWithPopup(auth, new GoogleAuthProvider());
+      await window.upgradeToGoogle();
     }
   } catch (err) {
     showToast("Auth failed: " + err.message, "error");
@@ -220,6 +269,68 @@ window.handleAuth = async () => {
 window.scrollToForm = () => {
   const el = document.getElementById("audit-section");
   if (el) el.scrollIntoView({ behavior: "smooth" });
+};
+
+// Task 1: live "X/100 Founding Member spots left" counter, pulled from real signup data — never
+// hardcoded. Also drives whether the Founding Member card shows the intro price or has already
+// rolled over to the standard price for new signups.
+async function loadPricingStatus() {
+  try {
+    const res = await fetch(`${API_BASE}/api/pricing/status`);
+    const data = await res.json();
+    if (!res.ok) return;
+    const counterEl = document.getElementById("foundingCounter");
+    if (counterEl) {
+      counterEl.textContent = data.foundingAvailable
+        ? `${data.foundingRemaining}/${data.foundingCap} Founding Member spots left`
+        : `All ${data.foundingCap} Founding Member spots claimed — now $${data.standardPriceUsd}/mo`;
+    }
+    const priceText = data.foundingAvailable ? `$${data.foundingPriceUsd}` : `$${data.standardPriceUsd}`;
+    ["foundingPriceDisplay", "foundingPriceDisplayModal"].forEach((id) => {
+      const el = document.getElementById(id);
+      if (el) el.textContent = priceText;
+    });
+  } catch (err) {
+    console.error("Failed to load pricing status:", err.message);
+  }
+}
+document.addEventListener("DOMContentLoaded", loadPricingStatus);
+
+window.openSignupModal = () => {
+  const modal = document.getElementById("signupModal");
+  if (modal) modal.classList.remove("hidden");
+};
+window.closeSignupModal = () => {
+  const modal = document.getElementById("signupModal");
+  if (modal) modal.classList.add("hidden");
+};
+
+window.becomeFoundingMember = async () => {
+  const btn = document.getElementById("foundingSubscribeBtn");
+  if (btn) setButtonLoading(btn, true);
+  try {
+    let user = currentUser;
+    if (!user || user.isAnonymous) {
+      user = await window.upgradeToGoogle();
+    }
+    const token = await user.getIdToken();
+    const res = await fetch(`${API_BASE}/api/billing/subscribe`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+      body: JSON.stringify({ plan: "founding" }),
+    });
+    const data = await res.json();
+    if (!res.ok) throw new Error(data.error || "Checkout is not available yet");
+    window.location.href = data.checkoutUrl;
+  } catch (err) {
+    showToast("Signup failed: " + err.message, "error");
+  } finally {
+    if (btn) setButtonLoading(btn, false);
+  }
+};
+
+window.contactAgencySales = () => {
+  window.location.href = "mailto:info@twittence.com?subject=Twittence%20Agency%20Plan";
 };
 
 const themeBtn = document.getElementById("themeBtn");
@@ -250,13 +361,9 @@ function setHS(step, state) {
 window.runBackendLoop = async () => {
   const btn = document.getElementById("runAuditBtn");
   if (!currentUser) {
-    showStatus(
-      'Please sign in first. <button onclick="handleAuth()" style="background:#e8b667;color:#15110c;border:none;padding:0.3rem 0.7rem;border-radius:4px;cursor:pointer;margin-left:0.5rem;font-size:0.85rem;font-weight:600">Sign In</button>',
-      "error",
-      4000,
-      true
-    );
-    scrollToForm();
+    // Anonymous sign-in normally completes within a moment of page load (see onAuthStateChanged
+    // above) — this only triggers on a very fast click or a slow network.
+    showStatus("Still connecting — try again in a second.", "info", 2500);
     return;
   }
 
@@ -288,6 +395,13 @@ window.runBackendLoop = async () => {
       body: JSON.stringify({ url, topic, vertical }),
     });
     const data = await res.json();
+    if (res.status === 429 && data.upgradeRequired) {
+      loading.style.display = "none";
+      setButtonLoading(btn, false);
+      showStatus(data.error, "info", 6000);
+      openSignupModal();
+      return;
+    }
     if (!res.ok) throw new Error(data.error || "Audit request failed");
 
     // Scores arrive immediately (no Claude call needed for them); the narrative (findings,
@@ -427,6 +541,9 @@ const MICRO_MOMENT_LABELS = {
 // ppc/social/email can't be scored from an on-page audit for any focus, so they always sink to the
 // bottom regardless of focus (impactful-but-unachievable-here isn't useful to surface first).
 const FOCUS_VERTICAL_PRIORITY = {
+  // Wellness/skincare/beauty DTC: sentiment (reviews, ingredient trust) and GEO (AI answers to "is X
+  // safe" / "best supplement for Y" questions) matter more here than for a generic e-commerce page.
+  "wellness dtc product pages": ["seo", "geo", "sentiment", "content", "technical", "aeo", "local"],
   "landing page optimization": ["seo", "aeo", "technical", "geo", "content", "sentiment", "local"],
   "e-commerce product pages": ["seo", "technical", "geo", "content", "local", "sentiment", "aeo"],
   "blog content strategy": ["content", "aeo", "seo", "geo", "sentiment", "technical", "local"],
@@ -554,7 +671,9 @@ function renderResults(r, url, topic) {
   const momentBadge = r.microMoment && MICRO_MOMENT_LABELS[r.microMoment]
     ? `<span class="chip warn" title="Google's want-to-know / want-to-go / want-to-do / want-to-buy framework — the search moment this audit's recommendations are tailored to">${MICRO_MOMENT_LABELS[r.microMoment]}</span>`
     : "";
-  const partialBanner = r.narrativePartial
+  const partialBanner = r.narrativeLocked
+    ? ""
+    : r.narrativePartial
     ? `<div class="status status-error" style="margin-bottom:1rem"><strong>AI narrative unavailable this run</strong> — the scores above are accurate (they come from the deterministic page crawl, not the AI), but findings, recommendations, and the self-healing plan couldn't be generated. Re-run the audit to get the full report.</div>`
     : r.narrativePending
     ? `<div class="status status-info" style="margin-bottom:1rem"><strong>Scores are final.</strong> Findings, recommendations, and the self-healing plan are still generating — this section will update automatically in a moment.</div>`
@@ -565,23 +684,40 @@ function renderResults(r, url, topic) {
     " — " + topicDisplay +
     `</span><span style="display:flex;gap:.4rem;flex-wrap:wrap">${momentBadge}<span class="chip ok">Scan complete</span></span></div><div class="report-body">`;
 
-  h += '<div><h4>Fix first</h4><ul class="punch-list">';
-  if (r.findings?.length) {
-    h += r.findings
-      .map((f, i) => `<li><span class="stripe ${i === 0 ? "crit" : stripeClass(s.tw)}"></span>${f}</li>`)
-      .join("");
-  } else if (r.narrativePending) {
-    h += '<li><span class="stripe warn"></span>Generating findings…</li>';
+  if (r.narrativeLocked) {
+    // Task 2: score is free, the narrative (findings/recommendations/self-healing plan) is paid.
+    // Server never sent this content at all for a locked audit, so there's nothing to hide client-side
+    // and nothing leaks in the network response — this is a real gate, not cosmetic.
+    h += `<div class="locked-panel">
+      <ul class="punch-list locked-teaser" aria-hidden="true">
+        <li><span class="stripe crit"></span>&nbsp;</li>
+        <li><span class="stripe warn"></span>&nbsp;</li>
+        <li><span class="stripe warn"></span>&nbsp;</li>
+      </ul>
+      <div class="locked-overlay">
+        <p>&#128274; <strong>Findings, recommendations, and the self-healing plan are a Founding Member feature.</strong></p>
+        <button class="btn-action" style="width:auto;padding:0.7rem 1.4rem" onclick="openSignupModal()">Generate Fixes — Unlock for $9.99/mo</button>
+      </div>
+    </div>`;
   } else {
-    h += '<li><span class="stripe ok"></span>No findings returned.</li>';
-  }
-  h += "</ul>";
-  if (r.recommendations?.length) {
-    h += '<h4 style="margin-top:1.25rem">Recommendations</h4><ul class="punch-list">';
-    h += r.recommendations.map((rec) => `<li><span class="stripe warn"></span>${rec}</li>`).join("");
+    h += '<div><h4>Fix first</h4><ul class="punch-list">';
+    if (r.findings?.length) {
+      h += r.findings
+        .map((f, i) => `<li><span class="stripe ${i === 0 ? "crit" : stripeClass(s.tw)}"></span>${f}</li>`)
+        .join("");
+    } else if (r.narrativePending) {
+      h += '<li><span class="stripe warn"></span>Generating findings…</li>';
+    } else {
+      h += '<li><span class="stripe ok"></span>No findings returned.</li>';
+    }
     h += "</ul>";
+    if (r.recommendations?.length) {
+      h += '<h4 style="margin-top:1.25rem">Recommendations</h4><ul class="punch-list">';
+      h += r.recommendations.map((rec) => `<li><span class="stripe warn"></span>${rec}</li>`).join("");
+      h += "</ul>";
+    }
+    h += "</div>";
   }
-  h += "</div>";
 
   const reportFileBase = (url || "audit").replace(/^https?:\/\//, "").replace(/[^a-z0-9]+/gi, "-").replace(/^-+|-+$/g, "");
   window.__lastReport = { url, topic, vertical, generatedAt: new Date().toISOString(), ...r };

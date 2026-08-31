@@ -12,6 +12,7 @@ const path = require("path");
 const fs = require("fs");
 const https = require("https");
 const http = require("http");
+const nodemailer = require("nodemailer");
 
 // Live citation tracking (Google AI Overview / ChatGPT / Perplexity) needs a paid third-party SERP
 // data provider — there's no free API for this. Both the "bring your own key" and "buy credits" paths
@@ -26,6 +27,48 @@ const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET;
 const CREDIT_PACK_PRICE_USD = Number(process.env.CREDIT_PACK_PRICE_USD || 9);
 const CREDIT_PACK_SIZE = Number(process.env.CREDIT_PACK_SIZE || 10);
 const stripe = STRIPE_SECRET_KEY ? require("stripe")(STRIPE_SECRET_KEY) : null;
+
+// Subscription pricing (Task 1). Founding Member is a limited-seat, limited-time introductory price:
+// the first FOUNDING_CAP subscribers get FOUNDING_PRICE_USD/mo for their first 12 billing cycles, then
+// automatically roll onto STANDARD_PRICE_USD/mo forever after — enforced server-side via a Stripe
+// Subscription Schedule (see the webhook below), not a cron job re-checking dates.
+const STRIPE_PRICE_FOUNDING = process.env.STRIPE_PRICE_FOUNDING;
+const STRIPE_PRICE_STANDARD = process.env.STRIPE_PRICE_STANDARD;
+const FOUNDING_CAP = Number(process.env.FOUNDING_CAP || 100);
+const FOUNDING_PRICE_USD = 9.99;
+const STANDARD_PRICE_USD = 49;
+const FREE_AUDITS_PER_MONTH = 1;
+
+// Task 4 — bundled citation checks. Cost math (DataForSEO Live Advanced SERP, the provider this
+// deployment's managed/credits path already uses — see fetchDataForSeoAiOverview below): $0.002 per
+// request (dataforseo.com/pricing/google-serp, checked 2026-08). At that cost, 25 checks/mo costs
+// $0.05 (≈0.5% of the $9.99 Founding price); 100 checks/mo costs $0.20 (≈0.4% of the $49 Standard/
+// Agency price) — trivial against either subscription, with wide margin left for Claude/PSI/hosting
+// costs shared across the account. BYOK stays available for usage beyond these bundles, but is no
+// longer the first thing a paying user has to configure.
+const BUNDLED_CITATION_CHECKS_BY_TIER = { founding: 25, standard: 100, agency: 100 };
+
+// Task 5 — weekly re-audit email. Generic SMTP rather than a specific vendor SDK: works with
+// Hostinger's own mailbox SMTP (this deployment's primary host already has one per domain) or any
+// other provider without adding a second paid dependency. Inert (logs, doesn't throw) when unset, so
+// a deployment without email configured yet doesn't crash the weekly job — it just skips sending.
+const SMTP_HOST = process.env.SMTP_HOST;
+const SMTP_PORT = Number(process.env.SMTP_PORT || 587);
+const SMTP_USER = process.env.SMTP_USER;
+const SMTP_PASS = process.env.SMTP_PASS;
+const SMTP_FROM = process.env.SMTP_FROM || SMTP_USER;
+const mailer = SMTP_HOST && SMTP_USER && SMTP_PASS
+  ? nodemailer.createTransport({ host: SMTP_HOST, port: SMTP_PORT, secure: SMTP_PORT === 465, auth: { user: SMTP_USER, pass: SMTP_PASS } })
+  : null;
+
+async function sendEmail(to, subject, html) {
+  if (!mailer) {
+    console.error(`Email not sent (SMTP not configured): to=${to} subject="${subject}"`);
+    return { sent: false, reason: "smtp_not_configured" };
+  }
+  await mailer.sendMail({ from: SMTP_FROM, to, subject, html });
+  return { sent: true };
+}
 
 const app = express();
 const PORT = process.env.PORT || 3000;
@@ -131,25 +174,90 @@ app.post("/api/webhooks/stripe", express.raw({ type: "application/json" }), asyn
   if (event.type === "checkout.session.completed") {
     const session = event.data.object;
     const uid = session.client_reference_id;
-    const credits = Number(session.metadata?.credits || 0);
-    if (uid && credits > 0) {
-      // Idempotency guard: Stripe retries webhook delivery on any non-2xx response or timeout, so the
-      // same "checkout.session.completed" event can arrive more than once. A transaction keyed on the
-      // Stripe event ID ensures credits are only ever granted once per completed checkout, even if
-      // this handler is invoked for the same session multiple times.
-      const eventRef = db.collection("processedStripeEvents").doc(event.id);
+    const eventRef = db.collection("processedStripeEvents").doc(event.id);
+
+    if (session.mode === "subscription" && uid) {
+      // Founding Member subscribe flow (Task 1). Seat-cap enforcement happens here, at payment
+      // confirmation, not at checkout-session creation — two people can create a checkout session for
+      // the last open seat at the same moment, but only one webhook wins the transaction below.
       const userRef = db.collection("users").doc(uid);
+      const counterRef = db.collection("counters").doc("foundingMembers");
+      let grantedTier = null;
       try {
-        await db.runTransaction(async (tx) => {
+        grantedTier = await db.runTransaction(async (tx) => {
           const eventDoc = await tx.get(eventRef);
-          if (eventDoc.exists) return; // already processed, no-op
+          if (eventDoc.exists) return null; // already processed
           tx.set(eventRef, { processedAt: admin.firestore.FieldValue.serverTimestamp(), sessionId: session.id });
-          tx.set(userRef, { citationCredits: admin.firestore.FieldValue.increment(credits) }, { merge: true });
+          const intendedTier = session.metadata?.intendedTier;
+          if (intendedTier === "founding") {
+            const counterDoc = await tx.get(counterRef);
+            const count = counterDoc.exists ? counterDoc.data().count || 0 : 0;
+            if (count < FOUNDING_CAP) {
+              tx.set(counterRef, { count: count + 1 }, { merge: true });
+              tx.set(userRef, { tier: "founding", foundingMemberNumber: count + 1, stripeSubscriptionId: session.subscription, stripeCustomerId: session.customer }, { merge: true });
+              return "founding";
+            }
+          }
+          tx.set(userRef, { tier: "standard", stripeSubscriptionId: session.subscription, stripeCustomerId: session.customer }, { merge: true });
+          return "standard";
         });
       } catch (err) {
-        console.error("Failed to credit citation purchase:", err.message);
-        return res.status(500).json({ error: "Failed to process payment" });
+        console.error("Failed to process subscription checkout:", err.message);
+        return res.status(500).json({ error: "Failed to process subscription" });
       }
+
+      if (grantedTier === "founding" && session.subscription) {
+        // Two-phase Subscription Schedule: 12 cycles at the founding price, then the standard price
+        // indefinitely — Stripe itself flips the price on schedule, no cron job re-checking dates.
+        try {
+          const schedule = await stripe.subscriptionSchedules.create({ from_subscription: session.subscription });
+          await stripe.subscriptionSchedules.update(schedule.id, {
+            phases: [
+              { items: [{ price: STRIPE_PRICE_FOUNDING, quantity: 1 }], iterations: 12 },
+              { items: [{ price: STRIPE_PRICE_STANDARD, quantity: 1 }] },
+            ],
+          });
+        } catch (scheduleErr) {
+          console.error("Failed to attach founding->standard price schedule:", scheduleErr.message);
+        }
+      } else if (grantedTier === "standard" && session.metadata?.intendedTier === "founding" && session.subscription) {
+        // Lost the last seat in the race window between checkout-session creation and payment
+        // confirmation. The subscription was created at the founding price; correct it to standard
+        // immediately so no one bills at the discounted rate outside the 100-seat cap.
+        try {
+          const sub = await stripe.subscriptions.retrieve(session.subscription);
+          await stripe.subscriptions.update(session.subscription, { items: [{ id: sub.items.data[0].id, price: STRIPE_PRICE_STANDARD }] });
+        } catch (fixErr) {
+          console.error("Failed to correct oversold founding subscription:", fixErr.message);
+        }
+      }
+    } else if (uid) {
+      const credits = Number(session.metadata?.credits || 0);
+      if (credits > 0) {
+        // Idempotency guard: Stripe retries webhook delivery on any non-2xx response or timeout, so the
+        // same "checkout.session.completed" event can arrive more than once. A transaction keyed on the
+        // Stripe event ID ensures credits are only ever granted once per completed checkout, even if
+        // this handler is invoked for the same session multiple times.
+        const userRef = db.collection("users").doc(uid);
+        try {
+          await db.runTransaction(async (tx) => {
+            const eventDoc = await tx.get(eventRef);
+            if (eventDoc.exists) return; // already processed, no-op
+            tx.set(eventRef, { processedAt: admin.firestore.FieldValue.serverTimestamp(), sessionId: session.id });
+            tx.set(userRef, { citationCredits: admin.firestore.FieldValue.increment(credits) }, { merge: true });
+          });
+        } catch (err) {
+          console.error("Failed to credit citation purchase:", err.message);
+          return res.status(500).json({ error: "Failed to process payment" });
+        }
+      }
+    }
+  } else if (event.type === "customer.subscription.deleted") {
+    const sub = event.data.object;
+    const uid = sub.metadata?.uid;
+    if (uid) {
+      await db.collection("users").doc(uid).set({ tier: "free" }, { merge: true })
+        .catch((err) => console.error("Failed to downgrade cancelled subscription:", err.message));
     }
   }
 
@@ -194,6 +302,39 @@ async function verifyToken(req, res, next) {
     console.error("Token verification failed:", error.message);
     return res.status(401).json({ error: "Invalid or expired authentication token" });
   }
+}
+
+function currentMonthKey() {
+  const d = new Date();
+  return `${d.getUTCFullYear()}-${String(d.getUTCMonth() + 1).padStart(2, "0")}`;
+}
+
+// Reads a user's paid tier. Works identically for a real (Google) account and an anonymous Firebase
+// session — both get a uid and a users/{uid} doc, so "free" behavior (score-only, 1 audit/mo) applies
+// the same way whether or not the visitor ever clicked "Sign In".
+async function getUserTier(uid) {
+  const doc = await db.collection("users").doc(uid).get();
+  const data = doc.exists ? doc.data() : {};
+  const tier = data.tier || "free";
+  return { tier, isPaid: tier === "founding" || tier === "standard" || tier === "agency" };
+}
+
+// Atomically enforces the free tier's 1-audit-per-calendar-month cap. Paid tiers are unlimited and
+// never touch this counter. Returns {allowed:false} rather than throwing when the cap is hit — that's
+// an expected, user-facing outcome (upgrade prompt), not a server error.
+async function checkAndConsumeFreeAudit(uid, isPaid) {
+  if (isPaid) return { allowed: true };
+  const userRef = db.collection("users").doc(uid);
+  const month = currentMonthKey();
+  return db.runTransaction(async (tx) => {
+    const doc = await tx.get(userRef);
+    const data = doc.exists ? doc.data() : {};
+    const freeAudits = data.freeAudits || {};
+    const usedThisMonth = freeAudits.month === month ? freeAudits.count || 0 : 0;
+    if (usedThisMonth >= FREE_AUDITS_PER_MONTH) return { allowed: false };
+    tx.set(userRef, { tier: data.tier || "free", freeAudits: { month, count: usedThisMonth + 1 } }, { merge: true });
+    return { allowed: true };
+  });
 }
 
 const BLOCKED_EXTENSIONS = /\.(png|jpg|jpeg|gif|webp|svg|ico|pdf|zip|rar|exe|mp4|mp3|wav|avi|mov|mkv|woff|woff2|ttf|eot|css|js|map)(\?.*)?$/i;
@@ -1189,6 +1330,127 @@ function computeUnifiedScore(scores) {
   );
 }
 
+// Task 5 — deterministic-only rescoring for the weekly re-audit email. Deliberately skips the Claude
+// narrative call: a weekly score-delta email ("AEO 58→67 this week") only needs the numbers, and
+// generating findings/recommendations for every paid user every week would be a real, avoidable Claude
+// cost for content nobody reads in an email. Full narrative is still one click away in the app.
+async function computeAllPillarScores(url, topic) {
+  const [fetchOutcome, robotsTxt, llmsTxtContent] = await Promise.all([
+    fetchHtmlWithFallback(url).catch((err) => { console.error("Weekly re-audit fetch failed:", err.message); return null; }),
+    fetchRobotsTxt(url),
+    fetchLlmsTxt(url),
+  ]);
+  const html = fetchOutcome?.html || null;
+  if (!html) return null;
+  const $ = cheerio.load(html, { decodeEntities: false });
+  const crawlerAccess = analyzeCrawlerAccess(robotsTxt);
+  const wikipediaPresence = await fetchWikipediaPresence(deriveBrandNameFromUrl(url));
+  const llmsTxtResult = analyzeLlmsTxt(llmsTxtContent);
+  const pricingTransparency = analyzePricingTransparency($("body").text() || "");
+  const seo = analyzeSeo($, html, url);
+  const aeo = analyzeAeo($, html);
+  const geo = analyzeGeo($, html, url, topic || "", crawlerAccess, wikipediaPresence, llmsTxtResult, pricingTransparency);
+  const sentiment = analyzeSentiment(html);
+  const scores = { seoScore: seo.seoScore, aeoScore: aeo.aeoScore, geoScore: geo.geoScore, sentimentScore: sentiment.sentimentScore };
+  const twittenceScore = computeUnifiedScore({
+    seo: { seoScore: scores.seoScore }, aeo: { aeoScore: scores.aeoScore },
+    geo: { geoScore: scores.geoScore }, sentiment: { sentimentScore: scores.sentimentScore },
+  });
+  return { ...scores, twittenceScore };
+}
+
+function deltaArrow(prev, curr) {
+  if (prev == null || curr == null) return `${curr ?? "N/A"}`;
+  const diff = curr - prev;
+  const sign = diff > 0 ? "▲" : diff < 0 ? "▼" : "▬";
+  return `${prev}→${curr} (${sign}${diff === 0 ? "0" : Math.abs(diff)})`;
+}
+
+function weeklyReauditEmailHtml(url, prevScores, newScores) {
+  const rows = [
+    ["Twittence signal", prevScores.twittenceScore, newScores.twittenceScore],
+    ["SEO", prevScores.seoScore, newScores.seoScore],
+    ["AEO", prevScores.aeoScore, newScores.aeoScore],
+    ["GEO", prevScores.geoScore, newScores.geoScore],
+    ["Sentiment", prevScores.sentimentScore, newScores.sentimentScore],
+  ].map(([label, prev, curr]) => `<tr><td style="padding:6px 12px">${label}</td><td style="padding:6px 12px;font-family:monospace">${deltaArrow(prev, curr)}</td></tr>`).join("");
+  return `<div style="font-family:sans-serif;max-width:480px"><h2>Your weekly Twittence update</h2><p>${url}</p><table style="border-collapse:collapse;width:100%">${rows}</table><p style="margin-top:1.5rem;font-size:.85rem;color:#666">Sign in at twittence.com to see full findings and recommendations for this run.</p></div>`;
+}
+
+// Re-audits one paid user's most recent tracked page and emails the score deltas. Called by the
+// weekly endpoint below for every paid user, or for a single uid when manually testing.
+async function runWeeklyReauditForUser(uid, email) {
+  const latestSnap = await db.collection("users").doc(uid).collection("audits").orderBy("createdAt", "desc").limit(1).get();
+  if (latestSnap.empty) return { skipped: "no_prior_audit" };
+  const latest = latestSnap.docs[0].data();
+  if (!latest.url) return { skipped: "no_url_on_prior_audit" };
+
+  const prevScores = {
+    twittenceScore: latest.twittenceScore ?? null,
+    seoScore: latest.seoScore ?? null,
+    aeoScore: latest.aeoScore ?? null,
+    geoScore: latest.geoScore ?? null,
+    sentimentScore: latest.sentimentScore ?? null,
+  };
+  const newScores = await computeAllPillarScores(latest.url, latest.topic || "");
+  if (!newScores) return { skipped: "fetch_failed" };
+
+  const auditRef = db.collection("users").doc(uid).collection("audits").doc();
+  await auditRef.set({
+    url: latest.url,
+    topic: latest.topic || "",
+    vertical: "all",
+    ...newScores,
+    results: { ...newScores, narrativePending: false, summary: "", findings: [], recommendations: [], selfHealingPlan: [] },
+    status: "complete",
+    auditType: "weekly-reaudit",
+    createdAt: admin.firestore.FieldValue.serverTimestamp(),
+    uid,
+  });
+
+  let emailResult = { sent: false, reason: "no_email_on_file" };
+  if (email) {
+    emailResult = await sendEmail(email, `Twittence weekly update — ${latest.url}`, weeklyReauditEmailHtml(latest.url, prevScores, newScores));
+  }
+  return { auditId: auditRef.id, prevScores, newScores, email: emailResult };
+}
+
+// Server-to-server only — no end-user Firebase session exists for a cron trigger, so this is guarded
+// by the same shared-secret pattern as /api/internal/fetch-proxy rather than verifyToken. Intended to
+// be hit by an OS-level cron job (Hostinger cron, see deploy/hostinger-shared-hosting.md) once a week;
+// pass {"uid": "..."} in the body to re-audit and email just one account (the acceptance-test path),
+// omit it to run for every paid user.
+app.post("/api/internal/weekly-reaudit", async (req, res) => {
+  if (!process.env.INTERNAL_FETCH_SECRET || req.headers["x-internal-secret"] !== process.env.INTERNAL_FETCH_SECRET) {
+    return res.status(403).json({ error: "Forbidden" });
+  }
+  try {
+    if (req.body?.uid) {
+      const doc = await db.collection("users").doc(req.body.uid).get();
+      const data = doc.exists ? doc.data() : {};
+      const result = await runWeeklyReauditForUser(req.body.uid, req.body.email || data.email || null);
+      return res.status(200).json({ processed: 1, results: [{ uid: req.body.uid, ...result }] });
+    }
+
+    const paidTiers = ["founding", "standard", "agency"];
+    const usersSnap = await db.collection("users").where("tier", "in", paidTiers).get();
+    const results = [];
+    for (const doc of usersSnap.docs) {
+      const data = doc.data();
+      try {
+        results.push({ uid: doc.id, ...(await runWeeklyReauditForUser(doc.id, data.email || null)) });
+      } catch (err) {
+        console.error(`Weekly re-audit failed for ${doc.id}:`, err.message);
+        results.push({ uid: doc.id, error: err.message });
+      }
+    }
+    res.status(200).json({ processed: results.length, results });
+  } catch (error) {
+    console.error("Weekly re-audit job error:", error);
+    res.status(500).json({ error: "Weekly re-audit job failed: " + error.message });
+  }
+});
+
 app.get("/api/health", (_req, res) => {
   res.status(200).json({ status: "ok", timestamp: new Date().toISOString() });
 });
@@ -1231,6 +1493,16 @@ app.post("/api/run-audit", verifyToken, async (req, res) => {
     const trimmedUrl = url.trim();
     const trimmedTopic = topic.trim();
     const trimmedVertical = vertical.trim().toLowerCase();
+
+    const { tier, isPaid } = await getUserTier(uid);
+    const freeAuditCheck = await checkAndConsumeFreeAudit(uid, isPaid);
+    if (!freeAuditCheck.allowed) {
+      return res.status(429).json({
+        error: "Free plan includes 1 audit per month, and you've already used it this month. Upgrade to Founding Member for unlimited audits plus full findings, recommendations, and the self-healing plan.",
+        upgradeRequired: true,
+        tier,
+      });
+    }
 
     auditRef = db.collection("users").doc(uid).collection("audits").doc();
     await auditRef.set({
@@ -1373,7 +1645,13 @@ ${JSON.stringify(ANALYSIS_BY_KEY[vertConfig.key], null, 2)}`;
       verticalScore,
       externalBenchmark: externalBenchmark || null,
       microMoment,
-      narrativePending: true,
+      // Task 2 paywall: the score above is always free. Findings/recommendations/selfHealingPlan (the
+      // Claude-generated narrative) are a paid-tier feature — for a free/unpaid uid we skip the Claude
+      // call entirely below rather than generate it and hide it client-side, which would just leak the
+      // "locked" content in the network response.
+      narrativePending: isPaid,
+      narrativeLocked: !isPaid,
+      tier,
       summary: "",
       findings: [],
       recommendations: [],
@@ -1411,6 +1689,15 @@ ${JSON.stringify(ANALYSIS_BY_KEY[vertConfig.key], null, 2)}`;
       results: scoresOnlyResults,
     });
     responseSent = true;
+
+    // Free-tier request: score is already delivered above, and it's the entire free-tier product —
+    // no Claude call is made for the narrative at all, so there's no cost incurred and nothing to
+    // background-generate. The audit doc is already marked "scoring"/narrative-locked at this point;
+    // mark it "complete" so /api/audit-status doesn't leave it in a permanently-pending state.
+    if (!isPaid) {
+      await auditRef.set({ status: "complete", auditPhase: "locked" }, { merge: true });
+      return;
+    }
 
     // Everything below runs after the response has already been sent — this request is done from the
     // client's perspective. On Hostinger (a persistent Node process) this reliably completes. On
@@ -1764,14 +2051,84 @@ app.get("/api/citation/status", verifyToken, async (req, res) => {
   try {
     const doc = await db.collection("users").doc(req.user.uid).get();
     const data = doc.exists ? doc.data() : {};
+    const tier = data.tier || "free";
+    const bundleCap = BUNDLED_CITATION_CHECKS_BY_TIER[tier] || 0;
+    const month = currentMonthKey();
+    const usedThisMonth = data.citationBundle?.month === month ? data.citationBundle.count || 0 : 0;
+    const bundleRemaining = Math.max(0, bundleCap - usedThisMonth);
     res.status(200).json({
       credits: data.citationCredits || 0,
+      bundleRemaining,
+      bundleCap,
       managedAvailable: Boolean(CITATION_PROVIDER_LOGIN && CITATION_PROVIDER_PASSWORD),
       billingConfigured: Boolean(stripe),
+      // BYOK is only worth surfacing once the bundle (paid tiers) and any purchased credits are both
+      // spent — a paying user shouldn't have to touch an API key field on their first check.
+      needsByok: bundleRemaining <= 0 && (data.citationCredits || 0) <= 0,
     });
   } catch (error) {
     console.error("Citation status error:", error);
     res.status(500).json({ error: "Failed to retrieve citation status" });
+  }
+});
+
+// Public — the live "X/100 Founding Member spots left" counter (Task 1) reads real signup data from
+// Firestore, not a hardcoded number. No auth required: this is marketing-page content, same trust
+// level as the pricing copy itself.
+app.get("/api/pricing/status", async (_req, res) => {
+  try {
+    const counterDoc = await db.collection("counters").doc("foundingMembers").get();
+    const count = counterDoc.exists ? counterDoc.data().count || 0 : 0;
+    res.status(200).json({
+      foundingCount: count,
+      foundingCap: FOUNDING_CAP,
+      foundingRemaining: Math.max(0, FOUNDING_CAP - count),
+      foundingAvailable: count < FOUNDING_CAP,
+      foundingPriceUsd: FOUNDING_PRICE_USD,
+      standardPriceUsd: STANDARD_PRICE_USD,
+      billingConfigured: Boolean(stripe && STRIPE_PRICE_FOUNDING && STRIPE_PRICE_STANDARD),
+    });
+  } catch (error) {
+    console.error("Pricing status error:", error);
+    res.status(500).json({ error: "Failed to load pricing status" });
+  }
+});
+
+app.post("/api/billing/subscribe", verifyToken, async (req, res) => {
+  if (!stripe || !STRIPE_PRICE_FOUNDING || !STRIPE_PRICE_STANDARD) {
+    return res.status(503).json({ error: "Billing is not configured on this deployment yet." });
+  }
+  if (req.body.plan !== "founding") {
+    // Agency is POA/white-label, not self-serve checkout — the pricing page routes that CTA to a
+    // contact form instead of this endpoint.
+    return res.status(400).json({ error: "Unknown or non-self-serve plan" });
+  }
+  if (!req.user.email) {
+    return res.status(400).json({ error: "A verified email is required to subscribe — please sign in with Google first." });
+  }
+  try {
+    // Stored so the weekly re-audit job (Task 5) has an address to email deltas to — the webhook that
+    // grants the paid tier runs server-to-server with no guaranteed access to the user's email.
+    await db.collection("users").doc(req.user.uid).set({ email: req.user.email }, { merge: true });
+    const counterDoc = await db.collection("counters").doc("foundingMembers").get();
+    const count = counterDoc.exists ? counterDoc.data().count || 0 : 0;
+    const seatAvailable = count < FOUNDING_CAP;
+    const priceId = seatAvailable ? STRIPE_PRICE_FOUNDING : STRIPE_PRICE_STANDARD;
+    const intendedTier = seatAvailable ? "founding" : "standard";
+    const session = await stripe.checkout.sessions.create({
+      mode: "subscription",
+      client_reference_id: req.user.uid,
+      customer_email: req.user.email,
+      line_items: [{ price: priceId, quantity: 1 }],
+      metadata: { uid: req.user.uid, intendedTier },
+      subscription_data: { metadata: { uid: req.user.uid, intendedTier } },
+      success_url: `${req.headers.origin || "https://twittence.com"}/?subscribe=success`,
+      cancel_url: `${req.headers.origin || "https://twittence.com"}/?subscribe=cancelled`,
+    });
+    res.status(200).json({ checkoutUrl: session.url, seatAvailable });
+  } catch (error) {
+    console.error("Subscribe checkout error:", error);
+    res.status(500).json({ error: "Failed to start checkout" });
   }
 });
 
@@ -1858,10 +2215,37 @@ app.post("/api/citation-check", verifyToken, async (req, res) => {
   const userRef = db.collection("users").doc(req.user.uid);
 
   try {
-    // Path 1: BYOK — the user's own key, sent fresh with this one request from the browser's
-    // sessionStorage. Never read from or written to Firestore, never touches disk: it exists only in
+    if (!CITATION_PROVIDER_LOGIN || !CITATION_PROVIDER_PASSWORD) {
+      if (!(byokProvider && byokApiKey)) {
+        return res.status(503).json({ error: "No API key on file, and this deployment has no managed provider configured yet." });
+      }
+    } else {
+      // Path 1 (Task 4, default for paid users): the tier's monthly bundled allowance — zero setup,
+      // no key required. Deducted atomically, same idempotency-under-concurrency reasoning as the
+      // credits path below.
+      const month = currentMonthKey();
+      const bundleUsed = await db.runTransaction(async (tx) => {
+        const fresh = await tx.get(userRef);
+        const data = fresh.exists ? fresh.data() : {};
+        const tier = data.tier || "free";
+        const cap = BUNDLED_CITATION_CHECKS_BY_TIER[tier] || 0;
+        if (cap <= 0) return false;
+        const bundle = data.citationBundle || {};
+        const usedThisMonth = bundle.month === month ? bundle.count || 0 : 0;
+        if (usedThisMonth >= cap) return false;
+        tx.set(userRef, { citationBundle: { month, count: usedThisMonth + 1 } }, { merge: true });
+        return true;
+      });
+      if (bundleUsed) {
+        const result = await fetchDataForSeoAiOverview(CITATION_PROVIDER_LOGIN, CITATION_PROVIDER_PASSWORD, keyword.trim());
+        return res.status(200).json({ source: "bundled", provider: "dataforseo", result });
+      }
+    }
+
+    // Path 2: BYOK — the user's own key, sent fresh with this one request from the browser's
+    // localStorage. Never read from or written to Firestore, never touches disk: it exists only in
     // this function's local variables for the lifetime of this single request, then is garbage
-    // collected like any other local variable. No credit deduction, since it's the user's own key.
+    // collected like any other local variable. No credit/bundle deduction, since it's the user's own key.
     if (byokProvider && byokApiKey) {
       if (!["dataforseo", "serpapi"].includes(byokProvider)) {
         return res.status(400).json({ error: "byokProvider must be 'dataforseo' or 'serpapi'" });
@@ -1872,11 +2256,8 @@ app.post("/api/citation-check", verifyToken, async (req, res) => {
       return res.status(200).json({ source: "byok", provider: byokProvider, result });
     }
 
-    // Path 2: managed credits — deducted atomically so two concurrent requests can't both succeed
+    // Path 3: purchased credits — deducted atomically so two concurrent requests can't both succeed
     // against a balance of 1.
-    if (!CITATION_PROVIDER_LOGIN || !CITATION_PROVIDER_PASSWORD) {
-      return res.status(503).json({ error: "No API key on file, and this deployment has no managed provider configured yet." });
-    }
     const deducted = await db.runTransaction(async (tx) => {
       const fresh = await tx.get(userRef);
       const credits = (fresh.exists ? fresh.data().citationCredits : 0) || 0;
@@ -1885,7 +2266,7 @@ app.post("/api/citation-check", verifyToken, async (req, res) => {
       return true;
     });
     if (!deducted) {
-      return res.status(402).json({ error: "No citation credits remaining and no personal API key on file.", checkoutRequired: true });
+      return res.status(402).json({ error: "No bundled checks, credits, or personal API key on file.", checkoutRequired: true });
     }
     const result = await fetchDataForSeoAiOverview(CITATION_PROVIDER_LOGIN, CITATION_PROVIDER_PASSWORD, keyword.trim());
     res.status(200).json({ source: "managed", provider: "dataforseo", result });

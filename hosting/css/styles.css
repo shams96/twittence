@@ -190,6 +190,26 @@ select option{background:var(--ink);color:var(--text)}
 .history-empty{text-align:center;padding:2.5rem 1rem;color:var(--text-dim)}
 .history-empty .he-icon{font-size:2rem;margin-bottom:0.5rem;opacity:0.6}
 
+.pricing-grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:1.25rem;margin-top:1rem}
+.pricing-card{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius-lg);padding:1.75rem 1.5rem;display:flex;flex-direction:column}
+.pricing-card h3{font-size:1.1rem;font-weight:700}
+.pricing-card.pricing-featured{border-color:var(--brass);box-shadow:0 8px 30px color-mix(in srgb, var(--brass) 18%, transparent);transform:translateY(-4px)}
+.pricing-price{font-family:var(--mono);font-size:2rem;font-weight:800;color:var(--brass-bright);margin:.5rem 0}
+.pricing-price span{font-size:.85rem;font-weight:500;color:var(--text-dim);margin-left:.2rem}
+.pricing-features{list-style:none;padding:0;margin:.75rem 0 1.25rem;flex:1 1 auto;font-size:.85rem;color:var(--text-dim)}
+.pricing-features li{padding:.35rem 0;border-top:1px solid var(--line)}
+.pricing-features li:first-child{border-top:none}
+
+.modal-backdrop{position:fixed;inset:0;background:color-mix(in srgb, var(--ink) 65%, transparent);display:flex;align-items:center;justify-content:center;z-index:100;padding:1rem}
+.modal-box{background:var(--panel);border:1px solid var(--line);border-radius:var(--radius-lg);padding:2rem;max-width:400px;width:100%;position:relative;text-align:center}
+.modal-close{position:absolute;top:.75rem;right:.9rem;background:none;border:none;font-size:1.4rem;color:var(--text-dim);cursor:pointer;line-height:1}
+.modal-close:hover{color:var(--text)}
+
+.locked-panel{position:relative;border-radius:var(--radius);overflow:hidden}
+.locked-teaser li{background:color-mix(in srgb, var(--line) 60%, transparent);border-radius:4px;margin-bottom:.5rem;height:1.1rem}
+.locked-overlay{position:absolute;inset:0;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:.75rem;text-align:center;padding:1rem;background:color-mix(in srgb, var(--panel) 88%, transparent);backdrop-filter:blur(2px)}
+.locked-overlay p{max-width:32ch;font-size:.9rem}
+
 footer{background:var(--panel);border-top:1px solid var(--line);padding:2rem 0;text-align:center;color:var(--text-dim);font-size:0.85rem;font-family:var(--mono)}
 .hidden{display:none!important}
 .scroll-section{scroll-margin-top:80px}
