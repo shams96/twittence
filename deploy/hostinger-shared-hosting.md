@@ -64,7 +64,6 @@ Same screen, **Environment Variables** section — add these:
 | `NODE_ENV` | `production` |
 | `FIREBASE_PROJECT_ID` | `sound-octagon-444117-m9` |
 | `ALLOWED_ORIGINS` | `https://twittence.com,https://www.twittence.com` |
-| `FIREBASE_SERVICE_ACCOUNT_JSON` | the full contents of your service-account key, see below |
 | `INTERNAL_FETCH_SECRET` | a random secret string — same value must also be set on the Firebase deployment's `functions/.env` |
 | `FETCH_PROXY_URL` | `https://us-central1-sound-octagon-444117-m9.cloudfunctions.net` |
 
@@ -77,14 +76,22 @@ page fetch fails, this makes the app fall back to fetching through the Firebase 
 instead, at no extra cost since that infrastructure already exists. Skip these two vars and audits
 will still work — they'll just be more likely to fail against Cloudflare-protected sites.
 
-### Getting the service-account JSON
+### Getting the service-account credentials
 
 Firebase Console → **sound-octagon-444117-m9** → Project Settings (gear icon) → **Service Accounts**
-tab → **Generate new private key**. This downloads a `.json` file. Open it, copy the *entire*
-contents, and paste that as the value of `FIREBASE_SERVICE_ACCOUNT_JSON`.
+tab → **Generate new private key**. This downloads a `.json` file.
 
-Treat this like a password — it grants admin access to your Firestore data and user accounts. Don't
-commit it, don't share it outside this one panel field.
+Don't paste its contents into an env var — a real key is 1600+ chars, over Hostinger's env-var field
+length limit. Instead, **rename the downloaded file to `service-account.json` and put it directly
+inside `functions/` in the zip** (next to `index.js`, *not* inside `hosting/` — `express.static` only
+ever serves `hosting/`, so a file placed in `functions/` itself is never reachable over HTTP). The
+code (`functions/index.js`) automatically detects and loads it from there if no
+`FIREBASE_SERVICE_ACCOUNT_JSON`/`GOOGLE_APPLICATION_CREDENTIALS` env var is set — no extra
+configuration needed.
+
+Treat this file like a password — it grants admin access to your Firestore data and user accounts.
+It's already covered by `.gitignore` (`service-account.json`); never commit it, and don't keep a copy
+of the zip with it included lying around anywhere public.
 
 ## 4. Deploy, then check runtime logs — don't guess
 

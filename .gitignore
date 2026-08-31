@@ -9,3 +9,5 @@ logs/
 *.log
 .DS_Store
 _pkg/
+service-account.json
+functions/.env.hostinger-import

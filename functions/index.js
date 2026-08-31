@@ -83,13 +83,20 @@ const hostingDir = fs.existsSync(siblingHostingDir) ? siblingHostingDir : bundle
 
 // On Cloud Functions, application-default credentials are provided automatically. Off Google Cloud
 // (a Hostinger VPS or shared-hosting Node.js app), there's no automatic credential source, so this
-// falls back to an explicit service-account key — either as a file path (GOOGLE_APPLICATION_CREDENTIALS,
-// convenient on a VPS you control) or as the key's JSON pasted directly into an env var
-// (FIREBASE_SERVICE_ACCOUNT_JSON, needed on shared hosting where you can't place files outside the
-// web root and the panel's UI is env-vars-only). See functions/.env.production.example.
+// falls back to an explicit service-account key, tried in order:
+// 1. GOOGLE_APPLICATION_CREDENTIALS — a file path, convenient on a VPS you control.
+// 2. FIREBASE_SERVICE_ACCOUNT_JSON — the key's JSON pasted directly into an env var. Doesn't work on
+//    hosts whose env-var UI caps field length (a real RSA private key alone is 1600+ chars, over
+//    Hostinger's ~1000-char field limit) — see option 3 for that case.
+// 3. A service-account.json file bundled directly alongside this file in the deploy zip (i.e. inside
+//    functions/, not hosting/, so express.static never serves it). No env var needed for this path —
+//    just include the actual downloaded key file in the zip. See functions/.env.production.example.
 let firebaseCredential;
+const bundledServiceAccountPath = path.join(__dirname, "service-account.json");
 if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
   firebaseCredential = admin.credential.cert(JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON));
+} else if (!process.env.GOOGLE_APPLICATION_CREDENTIALS && fs.existsSync(bundledServiceAccountPath)) {
+  firebaseCredential = admin.credential.cert(JSON.parse(fs.readFileSync(bundledServiceAccountPath, "utf8")));
 }
 admin.initializeApp({
   projectId: FIREBASE_PROJECT_ID,
