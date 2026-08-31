@@ -2,8 +2,11 @@ import { initializeApp } from "https://www.gstatic.com/firebasejs/10.10.0/fireba
 import {
   getAuth,
   signInWithPopup,
+  signInWithRedirect,
+  getRedirectResult,
   signInAnonymously,
   linkWithPopup,
+  linkWithRedirect,
   GoogleAuthProvider,
   onAuthStateChanged,
   signOut,
@@ -234,6 +237,13 @@ window.buyCitationCredits = async () => {
 // is also called from the signup modal (see openSignupModal) when an anonymous visitor tries to
 // unlock paid features — linking (not switching accounts) preserves their uid, so their free-tier
 // audit count and any audits already run under this session carry over rather than resetting.
+// Popup sign-in is blocked outright by some browsers (confirmed live: Chrome Incognito blocks the
+// Google OAuth popup by default) — not just a rare edge case, so this falls back to a full-page
+// redirect rather than just surfacing the error. A redirect leaves this page entirely, so the caller
+// can't get a return value back the normal way; see PENDING_INTENT_KEY / handleRedirectResult below
+// for how a "become a Founding Member" click resumes automatically after the redirect returns.
+const POPUP_BLOCKED_CODES = new Set(["auth/popup-blocked", "auth/popup-closed-by-user", "auth/cancelled-popup-request"]);
+
 window.upgradeToGoogle = async () => {
   if (!currentUser || !currentUser.isAnonymous) return currentUser;
   try {
@@ -243,8 +253,20 @@ window.upgradeToGoogle = async () => {
     if (err.code === "auth/credential-already-in-use") {
       // That Google account already has its own (non-anonymous) uid with its own history — sign into
       // it directly instead of linking, since linking a credential already owned elsewhere is rejected.
-      const result = await signInWithPopup(auth, new GoogleAuthProvider());
-      return result.user;
+      try {
+        const result = await signInWithPopup(auth, new GoogleAuthProvider());
+        return result.user;
+      } catch (err2) {
+        if (POPUP_BLOCKED_CODES.has(err2.code)) {
+          await signInWithRedirect(auth, new GoogleAuthProvider());
+          return null; // page is navigating away; nothing left to return to the caller
+        }
+        throw err2;
+      }
+    }
+    if (POPUP_BLOCKED_CODES.has(err.code)) {
+      await linkWithRedirect(currentUser, new GoogleAuthProvider());
+      return null; // page is navigating away; nothing left to return to the caller
     }
     throw err;
   }
@@ -305,14 +327,10 @@ window.closeSignupModal = () => {
   if (modal) modal.classList.add("hidden");
 };
 
-window.becomeFoundingMember = async () => {
-  const btn = document.getElementById("foundingSubscribeBtn");
-  if (btn) setButtonLoading(btn, true);
+const PENDING_INTENT_KEY = "twittence_pending_intent";
+
+async function subscribeFounding(user, btn) {
   try {
-    let user = currentUser;
-    if (!user || user.isAnonymous) {
-      user = await window.upgradeToGoogle();
-    }
     const token = await user.getIdToken();
     const res = await fetch(`${API_BASE}/api/billing/subscribe`, {
       method: "POST",
@@ -327,7 +345,49 @@ window.becomeFoundingMember = async () => {
   } finally {
     if (btn) setButtonLoading(btn, false);
   }
+}
+
+window.becomeFoundingMember = async () => {
+  const btn = document.getElementById("foundingSubscribeBtn");
+  if (btn) setButtonLoading(btn, true);
+  let user = currentUser;
+  if (!user || user.isAnonymous) {
+    // Set BEFORE calling upgradeToGoogle(): if it falls back to a redirect, the page navigates away
+    // immediately and nothing after this line runs — this flag is how handleRedirectResult() below
+    // knows to resume the subscribe call once the user comes back.
+    sessionStorage.setItem(PENDING_INTENT_KEY, "founding");
+    try {
+      user = await window.upgradeToGoogle();
+    } catch (err) {
+      sessionStorage.removeItem(PENDING_INTENT_KEY);
+      showToast("Signup failed: " + err.message, "error");
+      if (btn) setButtonLoading(btn, false);
+      return;
+    }
+    if (!user) return; // redirecting away; handleRedirectResult() finishes this on return
+    sessionStorage.removeItem(PENDING_INTENT_KEY);
+  }
+  await subscribeFounding(user, btn);
 };
+
+// Resumes a "Become a Founding Member" click that fell back to a full-page redirect (popup blocked).
+// Runs once on every load; a no-op for the vast majority of visitors who never triggered a redirect.
+async function handleRedirectResult() {
+  const pendingIntent = sessionStorage.getItem(PENDING_INTENT_KEY);
+  try {
+    const result = await getRedirectResult(auth);
+    if (result && result.user && pendingIntent === "founding") {
+      sessionStorage.removeItem(PENDING_INTENT_KEY);
+      await subscribeFounding(result.user);
+    } else if (pendingIntent) {
+      sessionStorage.removeItem(PENDING_INTENT_KEY);
+    }
+  } catch (err) {
+    sessionStorage.removeItem(PENDING_INTENT_KEY);
+    if (pendingIntent) showToast("Signup failed: " + err.message, "error");
+  }
+}
+handleRedirectResult();
 
 window.contactAgencySales = () => {
   window.location.href = "mailto:info@twittence.com?subject=Twittence%20Agency%20Plan";
