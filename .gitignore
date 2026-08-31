@@ -11,3 +11,4 @@ logs/
 _pkg/
 service-account.json
 functions/.env.hostinger-import
+hostinger-deploy.zip

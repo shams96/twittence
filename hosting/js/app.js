@@ -473,6 +473,9 @@ window.runBackendLoop = async () => {
     showToast("Phase 1 — Audit: complete", "success", 2000);
     setHS("research", "active");
     renderResults(data.results, url, topic);
+    // The score is the moment the visitor actually cares about — without this they land back on the
+    // marketing page above the fold and have to manually scroll past pricing/how-it-works to find it.
+    document.getElementById("results").scrollIntoView({ behavior: "smooth", block: "start" });
     showStatus("Scores ready — generating findings and recommendations…", "info");
     loading.style.display = "none";
     setButtonLoading(btn, false);
