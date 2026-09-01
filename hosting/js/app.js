@@ -707,6 +707,26 @@ function renderResults(r, url, topic) {
       }"><span>${s[k] !== null ? s[k] : "N/A"}</span></div>${benchmark}</div>`;
     });
     h += "</div>";
+    // Directly answers "how did we get this number" and sets the expectation that fixes take
+    // multiple audit cycles to show up in the score, not an instant jump — both requested explicitly,
+    // not guessed. Google/AI crawlers re-index on their own schedule, not on our request.
+    h += `<div class="status status-info" style="margin-top:1rem;text-align:left">
+      <strong>How this score was calculated:</strong> a live crawl and API check of this exact page —
+      SEO 30%, AEO 25%, GEO 25%, Sentiment 20%, each pillar scored 0–100, weighted average = your
+      Twittence Signal. Not estimated or sampled.
+      <br><br>
+      <strong>This is a snapshot, not a fix already applied.</strong> Once you act on the
+      recommendations below, expect the score to move over your next 2–3 monthly re-audits, not
+      instantly — search engines and AI crawlers re-index on their own schedule after a change ships.
+      ${
+        r.narrativeLocked
+          ? `<br><br><strong>Free plan is capped at 1 audit/month</strong> — you won't actually see
+             that improvement track without re-running it. Founding Members get unlimited audits plus
+             an automatic weekly re-audit emailed with the score delta, so the progress is visible
+             without you doing anything. <button class="btn-ghost-sm" style="margin-top:.5rem" onclick="openSignupModal()">See Founding Member</button>`
+          : ""
+      }
+    </div>`;
   } else if (r.verticalMeasurable === false) {
     h += `<div class="status status-info" style="margin-bottom:1rem"><strong>${
       VERTICAL_LABELS[vertical] || vertical
